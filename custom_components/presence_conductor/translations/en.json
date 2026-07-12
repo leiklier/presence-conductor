@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Presence Conductor",
+        "description": "Robust occupancy estimation for mmWave presence sensors. This creates the single Presence Conductor entry; mapping sensors to zones and rooms is configured in a later release."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Presence Conductor is already set up. Only a single instance is supported."
+    }
+  }
+}

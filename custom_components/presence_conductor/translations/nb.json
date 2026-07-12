@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Presence Conductor",
+        "description": "Robust tilstedeværelsesestimering for mmWave-sensorer. Dette oppretter den ene Presence Conductor-oppføringen; kobling av sensorer til soner og rom konfigureres i en senere versjon."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Presence Conductor er allerede satt opp. Kun én instans støttes."
+    }
+  }
+}
