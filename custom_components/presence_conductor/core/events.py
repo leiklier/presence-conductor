@@ -1,0 +1,76 @@
+"""Input events for the estimation engine.
+
+The adapter is responsible for:
+
+- coalescing a sensor's entity states into one :class:`SensorFrame` and
+  submitting it whenever any underlying entity changes (rule 1.1);
+- delivering a periodic :class:`Tick` (rule 1.2, default every 1.0 s);
+- monotonic time: every call to ``ConductorEngine.submit`` passes ``now``
+  (monotonic seconds). Events carry no timestamps.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class Event:
+    """Base class for all engine input events."""
+
+
+@dataclass(frozen=True, slots=True)
+class SensorFrame(Event):
+    """One coalesced snapshot of a sensor's entity states (rule 1.1).
+
+    Distances are ``None`` when the device reports no target of that kind.
+    Energies are raw 0-100 (``None`` when unknown); the core normalizes them
+    to [0, 1] on ingest (rule 1.4).
+    """
+
+    sensor_id: str
+    moving_distance_cm: float | None = None
+    still_distance_cm: float | None = None
+    move_energy: float | None = None
+    still_energy: float | None = None
+    has_target: bool = False
+    has_moving_target: bool = False
+    has_still_target: bool = False
+    #: Reserved for phase 2 (rule 8.1): per-gate energies from engineering
+    #: mode. Not consumed by the v1 estimator.
+    gate_move_energies: tuple[float, ...] | None = None
+    gate_still_energies: tuple[float, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Tick(Event):
+    """Periodic clock event (rule 1.2). All time-driven behavior advances
+    on ticks and event timestamps; the core never reads a clock."""
+
+
+@dataclass(frozen=True, slots=True)
+class SensorAvailability(Event):
+    """A sensor's entities became (un)available (rule 1.3)."""
+
+    sensor_id: str
+    available: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SetEnabled(Event):
+    """Global enable switch (rule 7.2)."""
+
+    enabled: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RecordBaseline(Event):
+    """Start a baseline calibration window for one zone (rule 3.3).
+
+    ``duration`` is the collection window in seconds; ``None`` uses
+    ``Tunables.baseline_duration`` (default 120 s). The operator asserts the
+    zone is empty for the window.
+    """
+
+    zone_id: str
+    duration: float | None = None
