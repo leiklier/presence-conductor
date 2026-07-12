@@ -1,4 +1,4 @@
-# Occupancy Conductor
+# Presence Conductor
 
 Robust occupancy estimation for mmWave presence sensors, as a Home Assistant
 custom integration (HACS).
@@ -20,6 +20,8 @@ automations can actually use:
 - **pass-by events**, dwell time, and a live probability per zone
 - **room-level fusion** of multiple sensors covering one room, with distance
   cutoffs so they don't claim each other's areas
+- **anyone-home** — an apartment-wide presence estimate with a slow memory,
+  for automations that only need to know whether anybody is around
 - **guided calibration** — record an empty-room baseline instead of hand
   tuning 18 gate thresholds
 

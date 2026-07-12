@@ -27,6 +27,12 @@ pattern) and **ghost blips** (short spurious detections). Downstream
 automations compensate with fixed delays, which trades latency for stability
 in both directions at once.
 
+A known environmental factor at kontor: a laptop sometimes sits between the
+occupant and the sensor, attenuating returns — partial occlusion presents as
+exactly the dropout pattern above. This favors an estimator that credits
+weakened sub-threshold energy as evidence over anything that trusts the
+radar's binary verdict.
+
 Additional requirements: multiple sensors may cover one room (stue =
 sofakrok + spisebord) and must not claim each other's areas
 (distance cutoffs); outputs should distinguish *passing through* from

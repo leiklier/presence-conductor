@@ -1,4 +1,4 @@
-# Occupancy Conductor — Engine Specification
+# Presence Conductor — Engine Specification
 
 This document is the normative contract for the estimation core. Code
 comments cite rules by number ("rule 4.2"). Changes to behavior land here
@@ -25,7 +25,13 @@ The published outputs per zone are: `occupied` (robust binary), `motion`
 (low-latency binary), `activity` (enum: `empty | passing | active |
 settled`), `probability` (sigmoid of lambda), `dwell_seconds`, and a
 `pass_by` event. Per room: `occupied`, `activity` (max-severity of member
-zones), `settled`. Adapters read published state; they never re-derive it.
+zones), `settled`. Per home: `anyone_home` and its probability (6.5).
+Adapters read published state; they never re-derive it.
+
+Zone outputs are a first-class consumer surface, not an internal detail:
+external consumers (sonos-conductor audio zones, lighting automations)
+subscribe to individual zones — sofakrok and spisebord each publish their
+full output set even though they fuse into one room.
 
 ## 1. Inputs and conditioning
 
@@ -152,6 +158,16 @@ A per-zone FSM driven by the posterior and channel dominance:
 - **6.4 No cross-zone inhibition.** Fusion is monotone: a zone can only add
   occupancy to its room, never veto another zone. Separation is done at the
   gate (2.2), not at fusion.
+- **6.5 Home presence.** The engine maintains a home-level log-odds
+  `lambda_home` of "someone is in the apartment". Any healthy zone being
+  occupied drives it up immediately (evidence, like 4.1); with all zones
+  empty it decays toward the empty prior with `tau_home` (default 20 min) —
+  deliberately much slower than zone decay, because the sensors do not cover
+  every room: all-zones-empty means "not seen lately", not "gone". Binary
+  `anyone_home` follows hysteresis thresholds like 4.3. If all zones are
+  unhealthy (6.3), `anyone_home` publishes unknown. Departure evidence
+  (entrance door + no re-detection) is a planned refinement (8.3); until
+  then `tau_home` is the honest ceiling on how fast "away" can be declared.
 
 ## 7. Failure modes and lifecycle
 
@@ -185,3 +201,10 @@ A per-zone FSM driven by the posterior and channel dominance:
 - **8.5** An offline replay harness (`tools/replay.py`: HA history export →
   estimator → transition metrics vs. the DECISION.md baseline table) ships
   alongside the first estimator PR and gates tuning changes.
+- **8.6 sonos-conductor integration path.** Zone outputs are designed to
+  replace the template occupancy helpers feeding sonos-conductor's audio
+  zones 1:1 (`occupied` as the drop-in, `activity ∈ {active, settled}` as
+  the richer upgrade so a walk-through never wakes a speaker). Deeper
+  integration — sonos-conductor consuming `activity`/`pass_by` natively, or
+  a future lighting FSM — happens on the consumer side; this engine stays a
+  presence estimator and grows no audio or lighting awareness.
