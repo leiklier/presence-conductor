@@ -1,0 +1,18 @@
+{
+  "domain": "presence_conductor",
+  "name": "Presence Conductor",
+  "codeowners": [
+    "@leiklier"
+  ],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/leiklier/presence-conductor",
+  "integration_type": "hub",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/leiklier/presence-conductor/issues",
+  "loggers": [
+    "custom_components.presence_conductor"
+  ],
+  "requirements": [],
+  "version": "0.0.1"
+}
