@@ -24,8 +24,9 @@ returns state changes and timer requests through a plan object.
 The published outputs per zone are: `occupied` (robust binary), `motion`
 (low-latency binary), `activity` (enum: `empty | passing | active |
 settled`), `probability` (sigmoid of lambda), `dwell_seconds`, and a
-`pass_by` event. Per room: `occupied`, `activity` (max-severity of member
-zones), `settled`. Per home: `anyone_home` and its probability (6.5).
+`pass_by` event. Per room: `occupied`, `motion` (any member zone's motion),
+`activity` (max-severity of member zones), `settled`. Per home: `anyone_home`
+and its probability (6.5).
 Adapters read published state; they never re-derive it.
 
 Zone outputs are a first-class consumer surface, not an internal detail:
@@ -196,9 +197,11 @@ A per-zone FSM driven by the posterior and channel dominance:
 - **6.1 Occupancy.** A room is occupied iff any healthy member zone is
   occupied. Probability: noisy-OR over member posteriors
   (`P_room = 1 − Π(1 − p_i)`), published for diagnostics.
-- **6.2 Activity.** Room activity is the maximum-severity member state
-  (`settled > active > passing > empty`). Room `settled` is true iff any
-  member zone is `SETTLED`.
+- **6.2 Activity and motion.** Room activity is the maximum-severity member
+  state (`settled > active > passing > empty`). Room `settled` is true iff
+  any member zone is `SETTLED`. Room `motion` is true iff any healthy member
+  zone's motion (4.4) is on — the same undamped fast channel, fused with OR,
+  and it inherits 4.4's flicker-by-design contract.
 - **6.3 Health.** Zones in `UNKNOWN` health (1.3) are excluded from fusion.
   A room with all members unknown publishes unknown, not off — downstream
   automations must be able to distinguish "nobody there" from "blind".

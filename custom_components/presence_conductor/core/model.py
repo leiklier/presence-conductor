@@ -270,6 +270,8 @@ class RoomState:
     member zone is in UNKNOWN health (rule 6.3)."""
 
     occupied: bool | None = None
+    #: Any healthy member zone's motion channel (rule 6.2).
+    motion: bool | None = None
     probability: float | None = None
     activity: Activity | None = None
     settled: bool | None = None

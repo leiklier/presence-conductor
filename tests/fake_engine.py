@@ -57,6 +57,7 @@ class FakeEngine:
         for room_id in config.room_ids():
             room = self.state.rooms[room_id] = RoomState()
             room.occupied = False
+            room.motion = False
             room.probability = t.p_prior
             room.activity = Activity.EMPTY
             room.settled = False

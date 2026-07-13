@@ -33,13 +33,18 @@ async def async_setup_entry(
 
 
 class ZoneRecordBaselineButton(ConductorEntity, ButtonEntity):
-    """Record the empty-room noise floor of one zone (rule 3.3)."""
+    """Record the empty-room noise floor of one zone (rule 3.3).
+
+    Lives on the zone's room device and — unlike the zone state entities —
+    stays enabled by default: calibration is a first-class operator action,
+    not a diagnostic.
+    """
 
     _attr_entity_category = EntityCategory.CONFIG
     _attr_translation_key = "record_baseline"
 
     def __init__(self, controller: PresenceConductorController, zone: ZoneConfig) -> None:
-        super().__init__(controller)
+        super().__init__(controller, room_id=zone.room_id)
         self._zone = zone
         self._attr_unique_id = f"{controller.entry.entry_id}_zone_{zone.zone_id}_record_baseline"
         self._attr_name = f"{zone.name} record baseline"

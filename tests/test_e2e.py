@@ -37,6 +37,11 @@ from tests.test_discovery import (
     cluster_entities,
 )
 
+# The e2e scenarios observe the full §0 surface, including the zone entities
+# that ship disabled by default (visibility defaults are covered in
+# tests/test_devices.py).
+pytestmark = pytest.mark.usefixtures("entity_registry_enabled_by_default")
+
 KJOKKEN = cluster_entities(KJOKKEN_PREFIX)
 KONTOR = cluster_entities(KONTOR_PREFIX)
 SOFAKROK = cluster_entities(SOFAKROK_PREFIX)
@@ -177,12 +182,17 @@ async def set_states(hass: HomeAssistant, states: dict[str, str]) -> None:
 
 
 async def enter_zone(hass: HomeAssistant, cluster: dict[str, str], distance: str) -> None:
-    """A person appears: strong move energy at a gated distance."""
+    """A person appears: strong move energy at a gated distance.
+
+    The distance moves first: every entity change coalesces a full frame
+    (rule 1.1), so energy-first would produce one frame crediting the strong
+    energy to whatever stale distance the cache still holds.
+    """
     await set_states(
         hass,
         {
-            cluster["move_energy"]: "80.0",
             cluster["moving_distance"]: distance,
+            cluster["move_energy"]: "80.0",
             cluster["moving_target"]: "on",
             cluster["target"]: "on",
         },
@@ -219,6 +229,8 @@ async def test_walk_through_produces_pass_by_and_no_settle(hass: HomeAssistant, 
     assert hass.states.get("binary_sensor.presence_conductor_sofakrok_motion").state == "on"
     assert hass.states.get("sensor.presence_conductor_sofakrok_activity").state == "passing"
     assert hass.states.get(OCC_ROOM_STUE).state == "on"
+    # Rule 6.2: the member zone's motion lifts the room's motion.
+    assert hass.states.get("binary_sensor.presence_conductor_stue_room_motion").state == "on"
     assert hass.states.get("sensor.presence_conductor_stue_room_activity").state == "passing"
     assert hass.states.get(ANYONE_HOME).state == "on"
 
@@ -239,6 +251,10 @@ async def test_walk_through_produces_pass_by_and_no_settle(hass: HomeAssistant, 
     assert event_state.state != "unknown"
     assert event_state.attributes["event_type"] == "pass_by"
     assert event_state.attributes["peak_probability"] >= 0.9
+    # The room-level event entity fired too, naming the traversed zone.
+    room_event = hass.states.get("event.presence_conductor_stue_room_pass_by")
+    assert room_event.state != "unknown"
+    assert room_event.attributes["zone_id"] == "sofakrok"
     # Rule 5.3: a walk-through never settles the room.
     assert hass.states.get(SETTLED_ROOM_STUE).state == "off"
     # Rule 6.5: anyone_home outlives the walk-through (tau_home is slow).
@@ -491,9 +507,10 @@ async def test_full_entity_inventory(hass: HomeAssistant) -> None:
     registry = er.async_get(hass)
     entries = er.async_entries_for_config_entry(registry, entry.entry_id)
     # Per zone: occupancy, motion, activity, probability, dwell, pass-by
-    # event, record-baseline button. Per room: occupancy, settled, activity,
-    # probability. Home: anyone_home + probability. Plus enabled + state.
-    assert len(entries) == 5 * 7 + 3 * 4 + 4
+    # event, record-baseline button. Per room: occupancy, motion, settled,
+    # activity, probability, pass-by event. Home: anyone_home + probability.
+    # Plus enabled + state.
+    assert len(entries) == 5 * 7 + 3 * 6 + 4
 
     for zone_id in ("kjokken", "kontor_pult", "kontor_dor", "sofakrok", "spisebord"):
         for entity_id in (
@@ -509,9 +526,11 @@ async def test_full_entity_inventory(hass: HomeAssistant) -> None:
     for room_id in ("kjokken", "kontor", "stue"):
         for entity_id in (
             f"binary_sensor.presence_conductor_{room_id}_room_occupancy",
+            f"binary_sensor.presence_conductor_{room_id}_room_motion",
             f"binary_sensor.presence_conductor_{room_id}_room_settled",
             f"sensor.presence_conductor_{room_id}_room_activity",
             f"sensor.presence_conductor_{room_id}_room_probability",
+            f"event.presence_conductor_{room_id}_room_pass_by",
         ):
             assert hass.states.get(entity_id) is not None, entity_id
     for entity_id in (
@@ -521,3 +540,115 @@ async def test_full_entity_inventory(hass: HomeAssistant) -> None:
         STATE_SENSOR,
     ):
         assert hass.states.get(entity_id) is not None, entity_id
+
+
+# ---------------------------------------------------------------------------
+# cross-covering sensors (the live stue layout)
+# ---------------------------------------------------------------------------
+
+CROSS_A = cluster_entities("apollo_msr_2_cross_a")
+CROSS_B = cluster_entities("apollo_msr_2_cross_b")
+CROSS_OPTIONS: dict[str, Any] = {
+    "sensors": [
+        {"sensor_id": "cross_a", "name": "Apollo MSR-2 A", "entities": CROSS_A},
+        {"sensor_id": "cross_b", "name": "Apollo MSR-2 B", "entities": CROSS_B},
+    ],
+    # Each sensor slices into BOTH rooms: A sees sofakrok near and spisebord
+    # far; B (mounted across the room) sees spisebord near and sofakrok far.
+    "zones": [
+        {
+            "zone_id": "a_sofakrok",
+            "name": "A sofakrok",
+            "sensor": "cross_a",
+            "room": "sofakrok",
+            "near_cm": 0.0,
+            "far_cm": 150.0,
+            "fallback": True,
+        },
+        {
+            "zone_id": "a_spisebord",
+            "name": "A spisebord",
+            "sensor": "cross_a",
+            "room": "spisebord",
+            "near_cm": 200.0,
+            "far_cm": 400.0,
+            "fallback": False,
+        },
+        {
+            "zone_id": "b_spisebord",
+            "name": "B spisebord",
+            "sensor": "cross_b",
+            "room": "spisebord",
+            "near_cm": 0.0,
+            "far_cm": 150.0,
+            "fallback": True,
+        },
+        {
+            "zone_id": "b_sofakrok",
+            "name": "B sofakrok",
+            "sensor": "cross_b",
+            "room": "sofakrok",
+            "near_cm": 200.0,
+            "far_cm": 400.0,
+            "fallback": False,
+        },
+    ],
+    "rooms": [
+        {"room_id": "sofakrok", "name": "Sofakrok"},
+        {"room_id": "spisebord", "name": "Spisebord"},
+    ],
+    "baselines": {
+        zone_id: dict(TIGHT_BASELINE)
+        for zone_id in ("a_sofakrok", "a_spisebord", "b_spisebord", "b_sofakrok")
+    },
+}
+
+
+def seed_cross_world(hass: HomeAssistant) -> None:
+    for cluster in (CROSS_A, CROSS_B):
+        for role, entity_id in cluster.items():
+            if entity_id.startswith("binary_sensor."):
+                hass.states.async_set(entity_id, "off")
+            elif "energy" in role:
+                hass.states.async_set(entity_id, "2.0")
+            else:
+                hass.states.async_set(entity_id, "0.0")
+
+
+async def test_two_sensors_cross_covering_two_rooms(hass: HomeAssistant, freezer) -> None:
+    """Each room fuses one zone from each of two sensors (§6): evidence at
+    either member zone — A's near slice or B's far slice — occupies the
+    sofakrok room, and never the spisebord room the same sensors also cover."""
+    seed_cross_world(hass)
+    _entry, _controller = await setup_e2e(hass, options=CROSS_OPTIONS)
+    occ_sofakrok = "binary_sensor.presence_conductor_sofakrok_room_occupancy"
+    occ_spisebord = "binary_sensor.presence_conductor_spisebord_room_occupancy"
+
+    # The room fuses its two cross-sensor member zones.
+    state = hass.states.get(occ_sofakrok)
+    assert state.state == "off"
+    assert state.attributes["zones"] == ["a_sofakrok", "b_sofakrok"]
+    assert hass.states.get(occ_spisebord).attributes["zones"] == ["a_spisebord", "b_spisebord"]
+
+    # Evidence at sensor A, 100 cm: A's sofakrok slice -> sofakrok occupied.
+    await enter_zone(hass, CROSS_A, "100.0")
+    assert hass.states.get(occ_sofakrok).state == "on"
+    assert hass.states.get(occ_spisebord).state == "off"  # gated out (2.1)
+
+    await leave_zone(hass, CROSS_A)
+    for _ in range(15):  # decay + absence evidence release the zone
+        await advance(hass, freezer, 1.0)
+    assert hass.states.get(occ_sofakrok).state == "off"
+
+    # Evidence at sensor B, 300 cm: B's *far* slice is the same room.
+    await enter_zone(hass, CROSS_B, "300.0")
+    assert hass.states.get(occ_sofakrok).state == "on"
+    assert hass.states.get(occ_spisebord).state == "off"
+
+    # And B's near slice is the other room.
+    await leave_zone(hass, CROSS_B)
+    for _ in range(15):
+        await advance(hass, freezer, 1.0)
+    await enter_zone(hass, CROSS_B, "100.0")
+    assert hass.states.get(occ_spisebord).state == "on"
+    assert hass.states.get(occ_sofakrok).state == "off"

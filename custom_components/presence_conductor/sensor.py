@@ -49,10 +49,17 @@ async def async_setup_entry(
 
 
 class ZoneSensor(ConductorEntity, SensorEntity):
-    """Base for per-zone sensors: health-gated availability (rule 1.3)."""
+    """Base for per-zone sensors: health-gated availability (rule 1.3).
+
+    Lives on the zone's room device; disabled by default — rooms and home
+    are the consumer surface (spec §0), zone outputs are the estimator's
+    internals, kept available as opt-in per-entity diagnostics.
+    """
+
+    _attr_entity_registry_enabled_default = False
 
     def __init__(self, controller: PresenceConductorController, zone: ZoneConfig) -> None:
-        super().__init__(controller)
+        super().__init__(controller, room_id=zone.room_id)
         self._zone = zone
 
     @property
@@ -128,7 +135,7 @@ class RoomSensor(ConductorEntity, SensorEntity):
     """Base for per-room sensors: unavailable while fusion is blind (6.3)."""
 
     def __init__(self, controller: PresenceConductorController, room_id: str) -> None:
-        super().__init__(controller)
+        super().__init__(controller, room_id=room_id)
         self._room_id = room_id
 
     @property
@@ -264,6 +271,7 @@ class ConductorStateSensor(ConductorEntity, SensorEntity):
             "rooms": {
                 room_id: {
                     "occupied": room.occupied,
+                    "motion": room.motion,
                     "activity": room.activity.value if room.activity is not None else None,
                     "settled": room.settled,
                     "probability": room.probability,

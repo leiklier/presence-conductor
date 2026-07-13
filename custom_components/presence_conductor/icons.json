@@ -19,6 +19,12 @@
           "on": "mdi:account-group"
         }
       },
+      "room_motion": {
+        "default": "mdi:motion-sensor-off",
+        "state": {
+          "on": "mdi:motion-sensor"
+        }
+      },
       "room_settled": {
         "default": "mdi:sofa-outline",
         "state": {
@@ -86,6 +92,9 @@
     },
     "event": {
       "pass_by": {
+        "default": "mdi:walk"
+      },
+      "room_pass_by": {
         "default": "mdi:walk"
       }
     }

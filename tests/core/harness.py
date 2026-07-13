@@ -270,7 +270,7 @@ class Harness:
             for zone_id, z in s.zones.items()
         )
         rooms = tuple(
-            (room_id, r.occupied, r.probability, str(r.activity), r.settled)
+            (room_id, r.occupied, r.motion, r.probability, str(r.activity), r.settled)
             for room_id, r in s.rooms.items()
         )
         return (
