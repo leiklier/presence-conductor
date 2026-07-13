@@ -183,8 +183,8 @@ class TestRule41Chronology:
         the final belief."""
         h = Harness()
         frames = [
-            (1.5, dict(still_d=100, still_e=35, still=True)),
-            (13.7, dict(move_e=5, still_e=5)),  # back at the floor
+            (1.5, {"still_d": 100, "still_e": 35, "still": True}),
+            (13.7, {"move_e": 5, "still_e": 5}),  # back at the floor
         ]
         events = sorted(
             [(t, kw) for t, kw in frames] + [(t, None) for t in tick_times if t <= 40.0],
