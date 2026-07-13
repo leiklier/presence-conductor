@@ -3,11 +3,253 @@
     "step": {
       "user": {
         "title": "Presence Conductor",
-        "description": "Robust occupancy estimation for mmWave presence sensors. This creates the single Presence Conductor entry; mapping sensors to zones and rooms is configured in a later release."
+        "description": "Robust occupancy estimation for mmWave presence sensors. Pick the radar devices the conductor should estimate from — you will slice each one into zones in the next steps.",
+        "data": {
+          "sensors": "Discovered sensors",
+          "add_manual": "Add a sensor manually"
+        },
+        "data_description": {
+          "sensors": "Devices exposing the LD2410 radar entity cluster (move/still energy plus distance), found in your entity registry. Apollo MSR-2 devices show up here automatically.",
+          "add_manual": "Turn on to assign a sensor's entities by hand — for radars whose entities do not follow the standard naming."
+        }
+      },
+      "manual_sensor": {
+        "title": "Manual sensor",
+        "description": "Assign the entities of one mmWave device to their roles. Energies and both distances are required; the binary target entities are optional and only sharpen the estimate.",
+        "data": {
+          "name": "Sensor name",
+          "move_energy": "Move energy",
+          "still_energy": "Still energy",
+          "moving_distance": "Moving target distance",
+          "still_distance": "Still target distance",
+          "detection_distance": "Detection distance",
+          "target": "Target",
+          "moving_target": "Moving target",
+          "still_target": "Still target",
+          "add_another": "Add another sensor"
+        },
+        "data_description": {
+          "name": "Display name for the device. It also becomes the sensor's internal ID, so it must be unique.",
+          "move_energy": "Radar move energy (0–100).",
+          "still_energy": "Radar still energy (0–100).",
+          "moving_distance": "Distance to the moving target, in cm.",
+          "still_distance": "Distance to the still target, in cm.",
+          "detection_distance": "Overall detection distance, in cm (optional).",
+          "target": "Binary presence output of the radar (optional).",
+          "moving_target": "Binary moving-target flag (optional).",
+          "still_target": "Binary still-target flag (optional).",
+          "add_another": "Turn on to assign one more sensor after this one."
+        }
+      },
+      "zones": {
+        "title": "Zone {zone_number} for {sensor} (sensor {sensor_number} of {sensor_count})",
+        "description": "A zone is a distance slice of this sensor's beam and the unit of estimation. The default is one zone covering the full range; give it the room it belongs to. Zones of different sensors that share a room are fused into one room occupancy.",
+        "data": {
+          "name": "Zone name",
+          "room": "Room",
+          "near_cm": "Near edge",
+          "far_cm": "Far edge",
+          "fallback": "Fallback zone",
+          "add_another_zone": "Add another zone for this sensor"
+        },
+        "data_description": {
+          "name": "Display name for the zone. It also becomes the zone's internal ID, so it must be unique.",
+          "room": "Zones with the same room name fuse into one room occupancy — pick an area or type any name. Same text = same room.",
+          "near_cm": "Nearest distance that belongs to this zone, in cm.",
+          "far_cm": "Farthest distance that belongs to this zone, in cm (600 is the radar's full range).",
+          "fallback": "Evidence without a usable distance reading is attributed to this zone. At most one per sensor; without one, the sensor's nearest zone is used.",
+          "add_another_zone": "Turn on to slice another zone out of this sensor's range."
+        }
+      },
+      "overlap": {
+        "title": "Overlapping zones",
+        "description": "Zones of different sensors overlap within the same room:\n\n{overlaps}\n\nSame-room separation relies on non-overlapping distance intervals — overlap means both sensors will claim the same target. This is a warning, not an error: submit to keep the configuration anyway, or adjust it later via Configure."
       }
     },
+    "error": {
+      "no_sensors_selected": "Select at least one sensor or turn on manual assignment.",
+      "invalid_sensor_name": "The sensor name must contain at least one letter or digit.",
+      "duplicate_sensor_name": "Another sensor already uses this name. Sensor names must be unique.",
+      "invalid_zone_name": "The zone name must contain at least one letter or digit.",
+      "duplicate_zone_name": "Another zone already uses this name. Zone names must be unique.",
+      "invalid_room_name": "The room name must contain at least one letter or digit.",
+      "invalid_zone_range": "The far edge must be greater than the near edge.",
+      "multiple_fallback_zones": "This sensor already has a fallback zone. At most one zone per sensor can be the fallback."
+    },
     "abort": {
-      "single_instance_allowed": "Presence Conductor is already set up. Only a single instance is supported."
+      "single_instance_allowed": "Presence Conductor is already set up. Only a single instance is supported — use Configure on the existing entry instead."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Presence Conductor options",
+        "description": "Pick a section to edit. Changes apply when the section is saved; recorded baselines are preserved.",
+        "menu_options": {
+          "sensors": "Sensors — add or remove mmWave devices",
+          "zones": "Zones — rooms, distance slices, fallback",
+          "tunables": "Tunables — evidence weights, thresholds, timings"
+        }
+      },
+      "sensors": {
+        "title": "Sensors",
+        "description": "Currently configured sensors are preselected; deselect to remove them (their zones are removed too). Newly discovered devices appear unselected — select to add them; you will define their zones next.",
+        "data": {
+          "sensors": "Sensors",
+          "add_manual": "Add a sensor manually"
+        },
+        "data_description": {
+          "sensors": "Configured sensors and newly discovered radar devices.",
+          "add_manual": "Turn on to assign a sensor's entities by hand."
+        }
+      },
+      "manual_sensor": {
+        "title": "Manual sensor",
+        "description": "Assign the entities of one mmWave device to their roles. Energies and both distances are required; the binary target entities are optional and only sharpen the estimate.",
+        "data": {
+          "name": "Sensor name",
+          "move_energy": "Move energy",
+          "still_energy": "Still energy",
+          "moving_distance": "Moving target distance",
+          "still_distance": "Still target distance",
+          "detection_distance": "Detection distance",
+          "target": "Target",
+          "moving_target": "Moving target",
+          "still_target": "Still target",
+          "add_another": "Add another sensor"
+        },
+        "data_description": {
+          "name": "Display name for the device. It also becomes the sensor's internal ID, so it must be unique.",
+          "move_energy": "Radar move energy (0–100).",
+          "still_energy": "Radar still energy (0–100).",
+          "moving_distance": "Distance to the moving target, in cm.",
+          "still_distance": "Distance to the still target, in cm.",
+          "detection_distance": "Overall detection distance, in cm (optional).",
+          "target": "Binary presence output of the radar (optional).",
+          "moving_target": "Binary moving-target flag (optional).",
+          "still_target": "Binary still-target flag (optional).",
+          "add_another": "Turn on to assign one more sensor after this one."
+        }
+      },
+      "new_zones": {
+        "title": "Zone {zone_number} for {sensor} (new sensor {sensor_number} of {sensor_count})",
+        "description": "Define the zones of the newly added sensor. The default is one zone covering the full range; give it the room it belongs to.",
+        "data": {
+          "name": "Zone name",
+          "room": "Room",
+          "near_cm": "Near edge",
+          "far_cm": "Far edge",
+          "fallback": "Fallback zone",
+          "add_another_zone": "Add another zone for this sensor"
+        },
+        "data_description": {
+          "name": "Display name for the zone. It also becomes the zone's internal ID, so it must be unique.",
+          "room": "Zones with the same room name fuse into one room occupancy — pick an area or type any name. Same text = same room.",
+          "near_cm": "Nearest distance that belongs to this zone, in cm.",
+          "far_cm": "Farthest distance that belongs to this zone, in cm (600 is the radar's full range).",
+          "fallback": "Evidence without a usable distance reading is attributed to this zone. At most one per sensor; without one, the sensor's nearest zone is used.",
+          "add_another_zone": "Turn on to slice another zone out of this sensor's range."
+        }
+      },
+      "zones": {
+        "title": "Zone {zone_number} of {zone_count}: {zone}",
+        "description": "Adjust this zone's room and distance slice. Current settings are prefilled; recorded baselines are preserved.",
+        "data": {
+          "room": "Room",
+          "near_cm": "Near edge",
+          "far_cm": "Far edge",
+          "fallback": "Fallback zone"
+        },
+        "data_description": {
+          "room": "Zones with the same room name fuse into one room occupancy — pick an area or type any name. Same text = same room.",
+          "near_cm": "Nearest distance that belongs to this zone, in cm.",
+          "far_cm": "Farthest distance that belongs to this zone, in cm (600 is the radar's full range).",
+          "fallback": "Evidence without a usable distance reading is attributed to this zone. At most one per sensor; without one, the sensor's nearest zone is used."
+        }
+      },
+      "overlap": {
+        "title": "Overlapping zones",
+        "description": "Zones of different sensors overlap within the same room:\n\n{overlaps}\n\nSame-room separation relies on non-overlapping distance intervals — overlap means both sensors will claim the same target. This is a warning, not an error: submit to save anyway."
+      },
+      "tunables": {
+        "title": "Tunables",
+        "description": "Behavioral tuning knobs of the estimation engine. The defaults mirror docs/ENGINE_SPEC.md; current values are prefilled.",
+        "data": {
+          "margin_cm": "Distance margin",
+          "stale_after": "Stale after",
+          "tick_interval": "Tick interval",
+          "sigma_min": "Sigma floor",
+          "default_mu": "Default baseline mean",
+          "default_sigma": "Default baseline sigma",
+          "z_cap": "Evidence cap",
+          "k_move": "Move weight",
+          "k_still": "Still weight",
+          "k_absence": "Absence weight",
+          "tau_decay": "Decay time constant",
+          "p_prior": "Empty prior",
+          "z_attack": "Attack threshold",
+          "p_attack": "Attack probability",
+          "theta_on": "Occupied on threshold",
+          "theta_off": "Occupied off threshold",
+          "z_motion": "Motion threshold",
+          "motion_hold": "Motion hold",
+          "p_min": "Probability floor",
+          "p_max": "Probability ceiling",
+          "p_background": "Background probability gate",
+          "t_background": "Background delay",
+          "tau_background": "Background time constant",
+          "baseline_duration": "Baseline duration",
+          "t_dwell": "Dwell time",
+          "t_settle": "Settle time",
+          "tau_home": "Home decay time constant",
+          "theta_home_on": "Anyone-home on threshold",
+          "theta_home_off": "Anyone-home off threshold"
+        },
+        "data_description": {
+          "margin_cm": "Zone mask slack absorbing the radar's interpolated-distance smoothing.",
+          "stale_after": "Silence window before an occupied sensor's zones go to unknown health.",
+          "tick_interval": "Expected tick cadence driving decay, dwell and holds.",
+          "sigma_min": "The calibrated noise-floor sigma is never below this (normalized energy units).",
+          "default_mu": "Baseline mean used for zones without a recorded baseline.",
+          "default_sigma": "Baseline sigma used for zones without a recorded baseline.",
+          "z_cap": "Per-channel cap on the evidence score, so one frame can never overwhelm the filter.",
+          "k_move": "Per-second evidence weight of the move channel.",
+          "k_still": "Per-second evidence weight of the still channel.",
+          "k_absence": "Per-second evidence against occupancy while both channels sit at baseline.",
+          "tau_decay": "Relaxation time constant of the posterior toward the empty prior (the departure hazard — there is no fixed occupancy timeout).",
+          "p_prior": "Empty-state prior probability the posterior decays toward.",
+          "z_attack": "Move evidence score that triggers the fast attack.",
+          "p_attack": "Probability floor applied immediately on fast attack (the lights-on path).",
+          "theta_on": "Occupied turns on at this probability.",
+          "theta_off": "Occupied turns off at this probability; between the thresholds the state holds.",
+          "z_motion": "Move evidence score that turns the raw motion output on.",
+          "motion_hold": "How long motion stays on after the last motion evidence.",
+          "p_min": "Lower posterior clamp, so long emptiness cannot build unbounded inertia.",
+          "p_max": "Upper posterior clamp, so long occupation cannot build unbounded inertia.",
+          "p_background": "Background adaptation runs only while the zone's posterior stays below this.",
+          "t_background": "How long the posterior must stay below the gate before adaptation starts.",
+          "tau_background": "EMA time constant of the slow background adaptation.",
+          "baseline_duration": "Default collection window of a Record baseline run.",
+          "t_dwell": "Continuous occupancy needed before passing becomes active.",
+          "t_settle": "Still-channel dominance needed before the zone counts as settled.",
+          "tau_home": "Decay time constant of anyone-home once every zone is empty — deliberately slow, because the sensors do not cover every room.",
+          "theta_home_on": "Anyone-home turns on at this probability.",
+          "theta_home_off": "Anyone-home turns off at this probability."
+        }
+      }
+    },
+    "error": {
+      "no_sensors_selected": "Select at least one sensor or turn on manual assignment.",
+      "invalid_sensor_name": "The sensor name must contain at least one letter or digit.",
+      "duplicate_sensor_name": "Another sensor already uses this name. Sensor names must be unique.",
+      "invalid_zone_name": "The zone name must contain at least one letter or digit.",
+      "duplicate_zone_name": "Another zone already uses this name. Zone names must be unique.",
+      "invalid_room_name": "The room name must contain at least one letter or digit.",
+      "invalid_zone_range": "The far edge must be greater than the near edge.",
+      "multiple_fallback_zones": "This sensor already has a fallback zone. At most one zone per sensor can be the fallback."
+    },
+    "abort": {
+      "no_zones_configured": "There are no zones to edit. Add sensors first."
     }
   }
 }
