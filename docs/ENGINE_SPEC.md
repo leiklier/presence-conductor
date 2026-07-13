@@ -140,8 +140,19 @@ never drift a zone toward occupied, regardless of how many gates it owns.
 
 - **3.1 Noise floor.** Per zone and per channel (move, still), calibration
   produces a robust baseline `(mu, sigma)` of the energy observed while the
-  zone is empty (median / MAD over the calibration window, floored by
-  `sigma_min` to avoid overconfidence).
+  zone is empty: `mu` is the window median; `sigma` is a **conservative
+  out-of-sample scale**, not the point estimate. A window-fitted scale has
+  sampling error, and the device reports integer energies so observed
+  deviations sit on a grid (`energy_quantum`, default 0.01 normalized —
+  one raw count): a MAD that quantizes one step low understates the scale
+  by 25–40%, and *every* future score is inflated by that error — an
+  underestimated scale is a hazard, not a calibration. So
+  `sigma = MAD_TO_SIGMA · (UCB(median |deviation|) + energy_quantum / 2)`,
+  floored by `sigma_min`, where `UCB` is the distribution-free one-sided
+  95% upper confidence bound for a median: the k-th order statistic of the
+  absolute deviations with `k = ceil(n/2 + 1.645 · sqrt(n) / 2)`. This is
+  what keeps the analytic attack tail (4.2) and the centered evidence
+  variance (3.2) meaningful *predictively*, on data the window never saw.
 - **3.2 Evidence score.** Per frame and channel, the **raw statistic** `S`
   is the one-sided deviation from the noise floor: on the gate path,
   `S = max over owned gates of max(0, (energy_g − mu_g) / sigma_g)` (2.5);
@@ -187,11 +198,28 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   and the statistic calibration (3.7). The operator asserts emptiness; the
   engine uses robust statistics so brief violations don't poison the
   baseline. Baselines persist in the config entry.
+  **Coverage:** a window with fewer than `stat_min_rows` rows replaces
+  *nothing* — floors included — and an individual channel or gate whose
+  column has fewer than `stat_min_rows` samples keeps its previous floor:
+  a scale cannot be certified from a handful of points (3.1).
+  **Lifecycle:** while the window is open the zone's estimator is
+  **suspended** — the operator has asserted emptiness, so scoring the
+  incoming frames against the old (possibly wrong) floors would let the
+  calibration itself manufacture occupancy and ratchet home memory. The
+  belief is pinned at the empty prior, `occupied`/`motion` are off, the
+  activity FSM is `EMPTY` (entered *without* a `pass_by` — the estimate is
+  declared void, nobody traversed), the attack chain is cleared, and
+  frames feed only the calibration rows. Fusion sees an ordinary empty
+  zone; other zones and legitimate home memory are untouched. On window
+  close the new calibration installs and the zone resumes from that empty
+  prior — the first post-window frame scores against the new floors.
 - **3.4 Background adaptation.** While a zone's confidence stays below
   `p_background` (default 0.05) for at least `t_background` (default 10 min),
   `(mu, sigma)` follow the observed energies with a slow EMA
-  (`tau_background`, default 1 h). Adaptation freezes the moment the
-  confidence rises. This tracks seasonal/furniture drift without learning a
+  (`tau_background`, default 1 h); the deviation target carries the same
+  half-quantum guard as 3.1 (the EMA's sampling error is negligible at its
+  time constant, the quantization bias is not). Adaptation freezes the
+  moment the confidence rises. This tracks seasonal/furniture drift without learning a
   person as noise. Adaptation moves the floors only; the statistic
   calibration (3.7) refreshes only on RecordBaseline, so large drift
   warrants recalibration (a "stuck occupied" recovery story is roadmap,

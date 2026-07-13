@@ -59,6 +59,8 @@ def advance_zone(
     """
     if zst.health is not Health.OK:
         return  # 1.3: outputs hold their last state while UNKNOWN
+    if zst.recording is not None:
+        return  # 3.3: suspended while calibrating — belief pinned at prior
     t = engine.config.tunables
     u = evidence.evidence_rate(zst, t)  # 3.2 (per second)
     lam = belief.advance(zst.lam, engine.lam_prior, u, dt, t.tau_decay)  # 4.1
@@ -77,6 +79,8 @@ def on_frame(engine: ConductorEngine, frame: SensorFrame, now: float, plan: Plan
     sensor = engine.state.sensors[frame.sensor_id]
     for zone in engine.config.zones_for_sensor(frame.sensor_id):
         zst = engine.state.zones[zone.zone_id]
+        if zst.recording is not None:
+            continue  # 3.3: suspended while calibrating
         # 4.2: strong move evidence floors the belief immediately - not
         # waiting for the next tick - once *confirmed*: attack_confirm
         # FRESH move observations, each past the analytic tail threshold

@@ -199,9 +199,9 @@ class TestRule26GatePrecedence:
 class TestRule36PerGateFloors:
     def test_rule_3_6_record_baseline_replaces_per_gate_floors(self) -> None:
         h = make_harness()
-        h.submit(RecordBaseline(DESK, duration=20.0))
-        assert h.deadlines[timers.baseline_end(DESK)] == pytest.approx(20.0)
-        raw = [8, 9, 10, 11, 12] * 4
+        h.submit(RecordBaseline(DESK, duration=80.0))
+        assert h.deadlines[timers.baseline_end(DESK)] == pytest.approx(80.0)
+        raw = [8, 9, 10, 11, 12] * 16
         raw[3] = 90  # a person walks through: brief violations don't poison
         for value in raw:
             h.send_frame(
@@ -210,11 +210,13 @@ class TestRule36PerGateFloors:
                 gate_still=gate_tuple({1: value, 2: None}),
             )
             h.step_to(h.now + 1.0)
-        h.run(5)  # window closes at t=20 during this run
+        h.run(5)  # window closes at t=80 during this run
         desk = h.zone(DESK)
         assert desk.recording is None
         assert desk.gate_move_baselines[1].mu == pytest.approx(0.10, abs=0.011)
-        assert 0.02 <= desk.gate_move_baselines[1].sigma <= 0.03  # MAD, floored (3.1)
+        # 3.1: UCB of the deviations (0.01 here — one outlier, not two) +
+        # half quantum, times 1.4826.
+        assert desk.gate_move_baselines[1].sigma == pytest.approx(1.4826 * 0.015, abs=0.002)
         assert desk.gate_still_baselines[1].mu == pytest.approx(0.10, abs=0.011)
         # Gate 2 reported nothing during the window: previous floor kept.
         assert desk.gate_move_baselines[2].mu == pytest.approx(MU)

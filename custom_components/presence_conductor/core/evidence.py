@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 from . import gating, stats
 from .events import RecordBaseline, SensorFrame
 from .model import (
+    Activity,
     BaselineRecording,
     BaselineRow,
     ChannelStats,
@@ -34,7 +35,7 @@ from .model import (
     ZoneState,
 )
 from .plan import BaselineRecorded
-from .timers import baseline_end
+from .timers import baseline_end, motion_off
 
 if TYPE_CHECKING:
     from .engine import ConductorEngine
@@ -45,16 +46,31 @@ if TYPE_CHECKING:
 MAD_TO_SIGMA = 1.4826
 #: Consistency factor for the EMA of absolute deviations (rule 3.4).
 ABS_DEV_TO_SIGMA = 1.2533
+#: One-sided 95% normal quantile for the scale UCB (rule 3.1).
+_UCB_Z = 1.645
 
 #: Statistic-calibration keys (rules 3.2, 3.7): channel + evidence path.
 STAT_KEYS = ("move_agg", "move_gate", "still_agg", "still_gate")
 
 
-def robust_stats(samples: list[float], sigma_min: float) -> tuple[float, float]:
-    """Median / MAD over a calibration window, sigma floored (rule 3.1)."""
+def robust_stats(samples: list[float], sigma_min: float, quantum: float) -> tuple[float, float]:
+    """Conservative out-of-sample noise floor over a window (rule 3.1).
+
+    ``mu`` is the median. ``sigma`` deliberately over-covers: an
+    underestimated scale inflates every future score (and voids the 4.2
+    tail guarantee), so instead of the MAD point estimate it uses the
+    distribution-free one-sided 95% upper confidence bound for the median
+    absolute deviation — the k-th order statistic of the deviations with
+    ``k = ceil(n/2 + 1.645 * sqrt(n) / 2)`` — plus half a quantization
+    step (integer-reported energies put deviations on a grid; a MAD that
+    quantizes one step low understates the scale by 25-40%).
+    """
     mu = median(samples)
-    mad = median([abs(s - mu) for s in samples])
-    return mu, max(sigma_min, MAD_TO_SIGMA * mad)
+    deviations = sorted(abs(s - mu) for s in samples)
+    n = len(deviations)
+    k = min(n, math.ceil(n / 2 + _UCB_Z * math.sqrt(n) / 2))  # 1-based rank
+    mad_ucb = deviations[k - 1]
+    return mu, max(sigma_min, MAD_TO_SIGMA * (mad_ucb + quantum / 2.0))
 
 
 def onesided_z(energy: float, floor: ChannelStats) -> float:
@@ -147,6 +163,11 @@ def ingest_frame(engine: ConductorEngine, frame: SensorFrame, now: float | None)
     gates = gating.gate_frame(engine.config, frame, sensor, now)  # 2.1-2.3, 2.7
     for zone in engine.config.zones_for_sensor(frame.sensor_id):
         zst = engine.state.zones[zone.zone_id]
+        if zst.recording is not None:
+            # 3.3: the estimator is suspended while calibrating — frames
+            # feed the calibration rows only; the published state stays
+            # the asserted "empty" (on_record_baseline pinned it).
+            continue
         owned = engine.owned_gates[zone.zone_id]  # 2.4
         move_gated, still_gated = gates[zone.zone_id]
         raw_move = gate_statistic(gate_move, owned, zst.gate_move_baselines, t)  # 2.5
@@ -243,9 +264,14 @@ def update_background_clock(engine: ConductorEngine, zst: ZoneState, now: float)
 
 
 def _ema_update(stats_: ChannelStats, energy: float, alpha: float, t: Tunables) -> None:
-    """One 3.4 EMA step of a noise floor toward an observed energy."""
+    """One 3.4 EMA step of a noise floor toward an observed energy.
+
+    The deviation target carries the same half-quantum guard as 3.1: the
+    EMA's sampling error is negligible at its time constant, the
+    quantization bias is not.
+    """
     stats_.mu += alpha * (energy - stats_.mu)
-    deviation = ABS_DEV_TO_SIGMA * abs(energy - stats_.mu)
+    deviation = ABS_DEV_TO_SIGMA * (abs(energy - stats_.mu) + t.energy_quantum / 2.0)
     stats_.sigma = max(t.sigma_min, stats_.sigma + alpha * (deviation - stats_.sigma))  # 3.1
 
 
@@ -330,11 +356,36 @@ def collect_baseline_rows(engine: ConductorEngine) -> None:
 def on_record_baseline(
     engine: ConductorEngine, event: RecordBaseline, now: float, plan: Plan
 ) -> None:
-    """Open a calibration window (3.3). Re-issuing restarts the window."""
+    """Open a calibration window (3.3). Re-issuing restarts the window.
+
+    The zone's estimator is suspended for the window: the operator has
+    asserted emptiness, and scoring frames against the old (possibly
+    wrong) floors would let the calibration manufacture occupancy and
+    ratchet home memory. The published state becomes exactly the
+    assertion — empty at the prior — without a ``pass_by`` (nobody
+    traversed; the estimate was declared void).
+    """
     zone = engine.config.zone_or_none(event.zone_id)
     if zone is None:  # unknown zone: ignore
         return
-    engine.state.zones[zone.zone_id].recording = BaselineRecording()
+    zst = engine.state.zones[zone.zone_id]
+    zst.recording = BaselineRecording()
+    zst.lam = engine.lam_prior  # 3.3: pinned at the empty prior
+    zst.occupied = False
+    zst.activity = Activity.EMPTY  # 3.3: no pass_by on this transition
+    zst.occupied_since = None
+    zst.dwell_seconds = 0.0
+    zst.peak_confidence = 0.0
+    zst.still_dominant_since = None
+    zst.move_dominant_since = None
+    zst.motion = False
+    plan.cancel_timer(motion_off(zone.zone_id))  # 4.4 hold is void
+    zst.z_move = zst.z_still = 0.0
+    zst.move_gated = zst.still_gated = False
+    zst.move_from_gates = zst.still_from_gates = False
+    zst.attack_candidate = False  # 4.2: chain cleared
+    zst.attack_count = 0
+    zst.attack_last = None
     duration = event.duration
     if duration is None:
         duration = engine.config.tunables.baseline_duration  # 3.3: default 120 s
@@ -370,19 +421,25 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
         return
     zst = engine.state.zones[zone.zone_id]
     recording, zst.recording = zst.recording, None
-    if recording is None or not recording.rows:
-        return  # nothing observed: keep the old calibration, persist nothing
+    if recording is None:
+        return
     t = engine.config.tunables
-    owned = engine.owned_gates[zone.zone_id]  # 2.4
     rows = recording.rows
-    # 3.1/3.3: aggregate floors. A channel that produced no samples keeps
-    # its previous floor.
+    if len(rows) < max(1, t.stat_min_rows):
+        # 3.3 coverage: a scale cannot be certified from a handful of
+        # points — keep the old calibration entirely, persist nothing.
+        return
+    owned = engine.owned_gates[zone.zone_id]  # 2.4
+    # 3.1/3.3: aggregate floors. A channel whose column is too thin keeps
+    # its previous floor (same coverage bar as the window itself).
     move_samples = [row.move_e for row in rows if row.move_e is not None]
     still_samples = [row.still_e for row in rows if row.still_e is not None]
-    if move_samples:
-        zst.move_baseline = ChannelStats(*robust_stats(move_samples, t.sigma_min))
-    if still_samples:
-        zst.still_baseline = ChannelStats(*robust_stats(still_samples, t.sigma_min))
+    if len(move_samples) >= t.stat_min_rows:
+        zst.move_baseline = ChannelStats(*robust_stats(move_samples, t.sigma_min, t.energy_quantum))
+    if len(still_samples) >= t.stat_min_rows:
+        zst.still_baseline = ChannelStats(
+            *robust_stats(still_samples, t.sigma_min, t.energy_quantum)
+        )
     # 3.6: per-gate floors are replaced alongside the aggregates.
     for column_of, floors in (
         (lambda row: row.gate_move, zst.gate_move_baselines),
@@ -396,8 +453,10 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
                 and index < len(values)
                 and values[index] is not None
             ]
-            if column:
-                floors[index] = ChannelStats(*robust_stats(column, t.sigma_min))  # 3.3 / 3.6
+            if len(column) >= t.stat_min_rows:  # 3.3 coverage per gate
+                floors[index] = ChannelStats(
+                    *robust_stats(column, t.sigma_min, t.energy_quantum)
+                )  # 3.3 / 3.6
     # 3.7: statistic calibration — the post-aggregation raw statistic per
     # channel and path, scored against the floors just recorded, so the
     # centered score's empty-room mean is ~0 by construction. Full replace:

@@ -360,8 +360,12 @@ async def test_startup_adopts_present_person(hass: HomeAssistant) -> None:
 
 
 async def test_record_baseline_service_persists_into_options(hass: HomeAssistant, freezer) -> None:
-    """Rule 3.3: the service records and the result lands in entry.options."""
-    entry, controller = await setup_e2e(hass)
+    """Rule 3.3: the service records and the result lands in entry.options.
+
+    stat_min_rows is lowered so a short test window passes the 3.3
+    coverage bar (production windows need 60+ rows).
+    """
+    entry, controller = await setup_e2e(hass, options={**OPTIONS, "tunables": {"stat_min_rows": 2}})
 
     await hass.services.async_call(
         DOMAIN, "record_baseline", {"zone_id": "kjokken", "duration": 5}, blocking=True
@@ -372,8 +376,9 @@ async def test_record_baseline_service_persists_into_options(hass: HomeAssistant
     await advance(hass, freezer, 0.5)  # the 5 s window closes
 
     recorded = entry.options["baselines"]["kjokken"]
-    assert recorded["move_mu"] == pytest.approx(0.04)  # median of the samples
-    assert recorded["move_sigma"] == pytest.approx(0.02)  # floored at sigma_min
+    assert recorded["move_mu"] == pytest.approx(0.04)  # median of the rows
+    # 3.1: UCB of the deviations + half quantum, times 1.4826.
+    assert recorded["move_sigma"] == pytest.approx(1.4826 * 0.015, abs=0.001)
     assert recorded["still_mu"] == pytest.approx(0.02)  # unchanged channel
     # The baselines-only write must not reload the entry.
     assert hass.data[DOMAIN][entry.entry_id] is controller

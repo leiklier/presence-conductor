@@ -25,16 +25,42 @@ from .harness import (
 
 
 class TestRule31RobustStats:
-    def test_rule_3_1_median_mad_shrugs_off_outliers(self) -> None:
+    def test_rule_3_1_median_shrugs_off_outliers(self) -> None:
         samples = [0.08, 0.09, 0.10, 0.11, 0.12] * 3 + [0.90, 0.95]
-        mu, sigma = robust_stats(samples, sigma_min=0.001)
+        mu, sigma = robust_stats(samples, sigma_min=0.001, quantum=0.0)
         assert mu == pytest.approx(0.10)
-        assert sigma == pytest.approx(1.4826 * 0.01)
+        # 3.1: sigma is the one-sided UCB of the deviations, not the MAD
+        # point estimate: n = 17 -> k = ceil(8.5 + 1.645 * sqrt(17) / 2)
+        # = 12, and the 12th smallest deviation here is 0.02.
+        assert sigma == pytest.approx(1.4826 * 0.02)
 
     def test_rule_3_1_sigma_is_floored(self) -> None:
-        mu, sigma = robust_stats([0.1] * 20, sigma_min=0.02)
+        mu, sigma = robust_stats([0.1] * 20, sigma_min=0.02, quantum=0.0)
         assert mu == pytest.approx(0.1)
-        assert sigma == 0.02  # constant samples: MAD 0, floor wins
+        assert sigma == 0.02  # constant samples: zero deviations, floor wins
+
+    def test_rule_3_1_half_quantum_guards_grid_bias(self) -> None:
+        # All deviations exactly one grid step: the half-quantum term keeps
+        # the scale from trusting the grid (3.1).
+        _mu, sigma = robust_stats([0.1, 0.11] * 30, sigma_min=0.001, quantum=0.01)
+        assert sigma == pytest.approx(1.4826 * (0.005 + 0.005))
+
+    def test_rule_3_1_ucb_covers_the_true_scale(self) -> None:
+        """The reviewer's failure mechanism: quantized-MAD point estimates
+        fitted 0.59-0.89x the true scale on ~120-row windows. The UCB +
+        half-quantum floor must cover the true scale in the overwhelming
+        majority of fits (seeded)."""
+        import random
+
+        rng = random.Random(2)
+        true_sigma = 0.05  # raw sigma 5, normalized
+        under = 0
+        for _ in range(300):
+            samples = [max(0, min(100, round(rng.gauss(20, 5)))) / 100.0 for _ in range(119)]
+            _, sigma = robust_stats(samples, sigma_min=0.02, quantum=0.01)
+            if sigma < true_sigma:
+                under += 1
+        assert under <= 6  # ~2% vs the ~50% of a point estimate
 
 
 class TestRule32EvidenceScore:
@@ -84,9 +110,9 @@ class TestRule32EvidenceScore:
 class TestRule33BaselineCalibration:
     def test_rule_3_3_record_baseline_replaces_stats_robustly(self) -> None:
         h = Harness()
-        h.submit(RecordBaseline(DESK, duration=20.0))
-        assert h.deadlines[timers.baseline_end(DESK)] == pytest.approx(20.0)
-        raw = [8, 9, 10, 11, 12] * 4
+        h.submit(RecordBaseline(DESK, duration=80.0))
+        assert h.deadlines[timers.baseline_end(DESK)] == pytest.approx(80.0)
+        raw = [8, 9, 10, 11, 12] * 16
         raw[3] = 90  # a person walks through: brief violations don't poison
         raw[11] = 95
         for value in raw:
@@ -94,11 +120,12 @@ class TestRule33BaselineCalibration:
             # so each 1 Hz frame is captured by the following tick.
             h.send_frame(KONTOR, move_e=value, still_e=value)
             h.step_to(h.now + 1.0)
-        h.run(5)  # window closed at t=20
+        h.run(5)  # window closed at t=80
         desk = h.zone(DESK)
         assert desk.recording is None
         assert desk.move_baseline.mu == pytest.approx(0.10, abs=0.011)
-        assert 0.02 <= desk.move_baseline.sigma <= 0.03  # MAD-derived, floored (3.1)
+        # 3.1: UCB of the deviations (0.02) + half quantum, times 1.4826.
+        assert desk.move_baseline.sigma == pytest.approx(1.4826 * 0.025, abs=0.002)
         assert desk.still_baseline.mu == pytest.approx(0.10, abs=0.011)
         assert h.persist_count == 1  # 3.3: baselines persist in the config entry
         events = h.baseline_events()

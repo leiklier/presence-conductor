@@ -197,6 +197,112 @@ def test_review_seeds_stay_empty_for_an_hour(seed: int, far_cm: float) -> None:
         assert not zone.occupied, f"seed {seed}: false occupancy at t={second}"
 
 
+def _noise_at(rng: random.Random, mu: float, sigma: float) -> float:
+    return float(max(0, min(100, round(rng.gauss(mu, sigma)))))
+
+
+def _tuple_at(
+    rng: random.Random, owned: tuple[int, ...], mu: float, sigma: float
+) -> tuple[float | None, ...]:
+    return gate_tuple({i: _noise_at(rng, mu, sigma) for i in owned}, fill=None)
+
+
+@pytest.mark.parametrize(
+    ("seed", "far_cm", "mu", "sigma"),
+    [(11, 600.0, 20.0, 5.0), (21, 600.0, 20.0, 5.0), (21, 600.0, 50.0, 10.0)],
+)
+def test_round3_seeds_with_uncalibrated_scale_noise(
+    seed: int, far_cm: float, mu: float, sigma: float
+) -> None:
+    """Round-3 review regressions: at these noise scales sigma_min no
+    longer masks per-gate scale underestimation, and the quantized-MAD
+    point estimate fitted gates as low as 0.59x the true scale — voiding
+    the analytic attack tail (seed 11: false attack 64 s in) and inflating
+    the evidence walk (seed 21: crossings ~250 s in). The 3.1 UCB +
+    half-quantum floor must hold them empty for the measured hour, after a
+    60 s post-calibration burn-in."""
+    config = _gate_zone_config(far_cm)
+    h = Harness(config, InitialSnapshot())
+    owned = h.engine.owned_gates["z"]
+    rng = random.Random(seed)
+    h.submit(RecordBaseline("z", duration=120.0))
+    for _ in range(121):
+        h.send_frame(
+            KONTOR,
+            gate_move=_tuple_at(rng, owned, mu, sigma),
+            gate_still=_tuple_at(rng, owned, mu, sigma),
+        )
+        h.step_to(h.now + 1.0)
+    zone = h.zone("z")
+    # 3.1: the fitted per-gate scales must essentially cover the true scale
+    # (the UCB is a 95% bound per fit; the old point estimates sat at
+    # 0.59-0.89x, which is what voided the tails).
+    for floor in zone.gate_move_baselines.values():
+        assert floor.sigma >= 0.9 * sigma / 100.0
+    for _ in range(60 + 3600):  # burn-in, then the measured hour
+        h.send_frame(
+            KONTOR,
+            gate_move=_tuple_at(rng, owned, mu, sigma),
+            gate_still=_tuple_at(rng, owned, mu, sigma),
+        )
+        h.step_to(h.now + 1.0)
+        assert not zone.occupied, f"seed {seed}: false occupancy at t={h.now}"
+
+
+def test_calibration_cannot_manufacture_occupancy() -> None:
+    """Round-3 blocker 2: an asserted-empty room with background well
+    above the default floors must not become occupied *by its own
+    calibration* — previously the window scored frames against the old
+    floors (occupied 11 s in, confidence 0.998 at close) and ratcheted
+    anyone_home for ~30 minutes (3.3 lifecycle)."""
+    config = _gate_zone_config(40.0)
+    h = Harness(config, InitialSnapshot())
+    owned = h.engine.owned_gates["z"]
+    rng = random.Random(1)
+    lam_home_before = h.state.lam_home
+    h.submit(RecordBaseline("z", duration=120.0))
+    zone = h.zone("z")
+    for _ in range(121):
+        h.send_frame(
+            KONTOR,
+            gate_move=_tuple_at(rng, owned, 20.0, 5.0),
+            gate_still=_tuple_at(rng, owned, 20.0, 5.0),
+        )
+        h.step_to(h.now + 1.0)
+        assert not zone.occupied  # 3.3: suspended, pinned at the prior
+        assert not zone.motion
+        if zone.recording is not None:  # window still open: pinned
+            assert zone.confidence == pytest.approx(0.02)
+        assert h.room("r").occupied is False
+        assert h.state.anyone_home is False
+    assert h.pass_bys() == []  # no synthetic traversal either
+    assert h.state.lam_home == pytest.approx(lam_home_before, abs=0.01)  # no ratchet
+    assert zone.recording is None  # window closed
+    assert zone.gate_move_baselines[0].mu == pytest.approx(0.20, abs=0.02)
+    # And with the *correct* floors installed, the same background stays empty.
+    for _ in range(300):
+        h.send_frame(
+            KONTOR,
+            gate_move=_tuple_at(rng, owned, 20.0, 5.0),
+            gate_still=_tuple_at(rng, owned, 20.0, 5.0),
+        )
+        h.step_to(h.now + 1.0)
+        assert not zone.occupied
+
+
+def test_calibration_voids_current_occupancy_without_pass_by() -> None:
+    """Pressing record-baseline on an occupied zone publishes the operator's
+    assertion — empty at the prior — with no pass_by (3.3)."""
+    h = Harness()
+    h.occupy(SOFAKROK)
+    assert h.zone(SOFA).occupied
+    h.submit(RecordBaseline(SOFA, duration=30.0))
+    zone = h.zone(SOFA)
+    assert not zone.occupied
+    assert zone.confidence == pytest.approx(0.02)
+    assert h.pass_bys() == []
+
+
 class TestRule37Shrinkage:
     def test_empirical_scale_is_floored_by_the_analytic_reference(self) -> None:
         """A near-constant window would fit a tiny s0; the stored scale must
@@ -215,9 +321,9 @@ class TestRule37Shrinkage:
         cal = h.zone("z").stat_cal["move_gate"]
         assert cal.sigma == pytest.approx(onesided_max_stats(3)[1])
 
-    def test_short_windows_keep_the_analytic_fallback(self) -> None:
-        """Fewer than stat_min_rows rows cannot certify a statistic (3.7):
-        the floors are replaced, the statistic calibration is not."""
+    def test_short_windows_replace_nothing(self) -> None:
+        """Fewer than stat_min_rows rows cannot certify a scale (3.1, 3.3):
+        neither the floors nor the statistic calibration are replaced."""
         config = _gate_zone_config(150.0)
         h = Harness(config, InitialSnapshot())
         owned = h.engine.owned_gates["z"]
@@ -227,8 +333,8 @@ class TestRule37Shrinkage:
             h.send_frame(KONTOR, gate_move=_noise_tuple(rng, owned))
             h.step_to(h.now + 1.0)
         zone = h.zone("z")
-        assert zone.gate_move_baselines  # floors were recorded
-        assert zone.stat_cal == {}  # statistic was not (3.7)
+        assert zone.gate_move_baselines == {}  # floors kept (3.3 coverage)
+        assert zone.stat_cal == {}  # statistic kept too (3.7)
 
 
 class TestRule42AttackTail:

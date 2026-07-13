@@ -101,6 +101,10 @@ class Tunables:
     #: Noise-floor sigma is never below this (rule 3.1), in normalized
     #: energy units. The spec fixes no default; 0.02 = two raw energy points.
     sigma_min: float = 0.02
+    #: Device energy quantization step, normalized (rules 3.1, 3.4): LD2410
+    #: energies are integers 0-100, so one step is 0.01. Half a step guards
+    #: the scale estimates against grid bias.
+    energy_quantum: float = 0.01
     #: Baseline used for zones with no persisted calibration (spec is
     #: silent; deliberately wide so uncalibrated zones are conservative).
     default_mu: float = 0.10

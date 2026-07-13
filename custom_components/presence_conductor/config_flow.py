@@ -69,6 +69,7 @@ _TUNABLE_UI: dict[str, tuple[float, float, float, str | None]] = {
     "stale_after": (5, 300, 5, "s"),
     "tick_interval": (0.1, 10, 0.1, "s"),
     "sigma_min": (0.001, 0.2, 0.001, None),
+    "energy_quantum": (0, 0.1, 0.001, None),
     "default_mu": (0, 1, 0.01, None),
     "default_sigma": (0.001, 1, 0.001, None),
     "z_cap": (1, 20, 0.5, None),
