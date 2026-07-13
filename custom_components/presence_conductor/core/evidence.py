@@ -19,6 +19,7 @@ empty (3.4).
 from __future__ import annotations
 
 import math
+from itertools import pairwise
 from statistics import fmean, median, pstdev
 from typing import TYPE_CHECKING
 
@@ -75,11 +76,7 @@ def robust_stats(samples: list[float], sigma_min: float, quantum: float) -> tupl
     # rho comes from the lag-1 sign agreement around the median (the rank
     # trials ARE those signs), which outliers cannot poison.
     signs = [1 if sample > mu else -1 for sample in samples if sample != mu]
-    agree = (
-        sum(a == b for a, b in zip(signs, signs[1:], strict=False)) / (len(signs) - 1)
-        if len(signs) > 1
-        else 0.0
-    )
+    agree = sum(a == b for a, b in pairwise(signs)) / (len(signs) - 1) if len(signs) > 1 else 0.0
     rho = max(0.0, 2.0 * agree - 1.0)
     rho = min(0.999, rho + _UCB_Z * math.sqrt(max(0.0, 1.0 - rho * rho) / n))
     n_eff = max(2.0, n * (1.0 - rho) / (1.0 + rho))

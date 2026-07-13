@@ -10,6 +10,7 @@ clamp (4.5). There is no fixed occupancy timeout anywhere in the engine
 
 from __future__ import annotations
 
+from itertools import pairwise
 from typing import TYPE_CHECKING
 
 from . import activity, belief, evidence, timers
@@ -77,7 +78,7 @@ def advance_zone(
                 cuts.add(expiry)
     lam = zst.lam
     boundaries = sorted(cuts)
-    for seg_start, seg_end in zip(boundaries, boundaries[1:], strict=False):
+    for seg_start, seg_end in pairwise(boundaries):
         # Ages at the segment midpoint: u is constant inside a segment, and
         # the midpoint never lands exactly on an expiry boundary, so the
         # result is independent of how ticks slice the interval (4.1).
