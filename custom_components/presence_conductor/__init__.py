@@ -17,10 +17,16 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 
 from .config import build_config
 from .const import CONF_BASELINES, CONF_SENSORS, DOMAIN
-from .controller import PresenceConductorController, build_initial_snapshot
+from .controller import (
+    PresenceConductorController,
+    build_initial_snapshot,
+    conductor_device_info,
+    room_device_info,
+)
 from .core.engine import ConductorEngine
 from .core.events import RecordBaseline
 
@@ -70,11 +76,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DATA_RELOAD_BASELINE, {})[entry.entry_id] = _reload_relevant(entry.options)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     _async_register_services(hass)
+    if controller is not None:
+        _async_register_devices(hass, entry, controller)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     if controller is not None:
         controller.async_start()
     return True
+
+
+@callback
+def _async_register_devices(
+    hass: HomeAssistant, entry: ConfigEntry, controller: PresenceConductorController
+) -> None:
+    """Register the hub and one device per configured room.
+
+    Done before platform forwarding so the room devices' ``via_device``
+    reference always resolves, regardless of the order entities register
+    in. Devices of rooms that no longer exist are released from the entry.
+    """
+    registry = dr.async_get(hass)
+    registry.async_get_or_create(config_entry_id=entry.entry_id, **conductor_device_info(entry))
+    expected = {(DOMAIN, entry.entry_id)}
+    for room_id in controller.config.room_ids():
+        info = room_device_info(controller, room_id)
+        registry.async_get_or_create(config_entry_id=entry.entry_id, **info)
+        expected |= info["identifiers"]
+    for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
+        if not device.identifiers & expected:
+            registry.async_update_device(device.id, remove_config_entry_id=entry.entry_id)
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:

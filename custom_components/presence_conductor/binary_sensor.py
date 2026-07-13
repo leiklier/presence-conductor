@@ -1,4 +1,5 @@
-"""Binary outputs: zone occupancy/motion, room occupancy/settled, anyone home.
+"""Binary outputs: zone occupancy/motion, room occupancy/motion/settled,
+anyone home.
 
 All values are read straight from the engine's published state (spec §0);
 nothing is re-derived here. Zone entities report unavailable while their
@@ -35,16 +36,24 @@ async def async_setup_entry(
         entities.append(ZoneMotionSensor(controller, zone))
     for room_id in controller.config.room_ids():
         entities.append(RoomOccupancySensor(controller, room_id))
+        entities.append(RoomMotionSensor(controller, room_id))
         entities.append(RoomSettledSensor(controller, room_id))
     entities.append(AnyoneHomeSensor(controller))
     async_add_entities(entities)
 
 
 class ZoneBinarySensor(ConductorEntity, BinarySensorEntity):
-    """Base for per-zone binaries: health-gated availability (rule 1.3)."""
+    """Base for per-zone binaries: health-gated availability (rule 1.3).
+
+    Lives on the zone's room device; disabled by default — rooms and home
+    are the consumer surface (spec §0), zone outputs are the estimator's
+    internals, kept available as opt-in per-entity diagnostics.
+    """
+
+    _attr_entity_registry_enabled_default = False
 
     def __init__(self, controller: PresenceConductorController, zone: ZoneConfig) -> None:
-        super().__init__(controller)
+        super().__init__(controller, room_id=zone.room_id)
         self._zone = zone
 
     @property
@@ -96,7 +105,7 @@ class RoomBinarySensor(ConductorEntity, BinarySensorEntity):
     """Base for per-room binaries: unavailable while fusion is blind (6.3)."""
 
     def __init__(self, controller: PresenceConductorController, room_id: str) -> None:
-        super().__init__(controller)
+        super().__init__(controller, room_id=room_id)
         self._room_id = room_id
 
     @property
@@ -129,6 +138,26 @@ class RoomOccupancySensor(RoomBinarySensor):
     @property
     def is_on(self) -> bool | None:
         return self.room_state.occupied
+
+
+class RoomMotionSensor(RoomBinarySensor):
+    """Any healthy member zone's motion channel (rule 6.2): flicker by design."""
+
+    _attr_device_class = BinarySensorDeviceClass.MOTION
+    _attr_translation_key = "room_motion"
+
+    def __init__(self, controller: PresenceConductorController, room_id: str) -> None:
+        super().__init__(controller, room_id)
+        self._attr_unique_id = f"{controller.entry.entry_id}_room_{room_id}_motion"
+        self._attr_name = f"{controller.room_name(room_id)} room motion"
+
+    @property
+    def available(self) -> bool:
+        return self.room_state.motion is not None
+
+    @property
+    def is_on(self) -> bool | None:
+        return self.room_state.motion
 
 
 class RoomSettledSensor(RoomBinarySensor):

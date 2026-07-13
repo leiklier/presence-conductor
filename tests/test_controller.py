@@ -532,7 +532,8 @@ async def test_real_options_change_reloads(hass: HomeAssistant, monkeypatch) -> 
 # ---------------------------------------------------------------------------
 
 
-async def test_pass_by_fires_bus_event_and_event_entity(hass: HomeAssistant, monkeypatch) -> None:
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_pass_by_fires_bus_event_and_event_entities(hass: HomeAssistant, monkeypatch) -> None:
     _, controller, fake = await setup_conductor(hass, monkeypatch)
     captured = async_capture_events(hass, "presence_conductor_pass_by")
 
@@ -551,6 +552,15 @@ async def test_pass_by_fires_bus_event_and_event_entity(hass: HomeAssistant, mon
     assert entity_state.attributes["event_type"] == "pass_by"
     assert entity_state.attributes["peak_probability"] == 0.9312
     assert entity_state.attributes["duration"] == 3.22
+    # The zone's room fired too (§6 membership), carrying the zone id.
+    room_state = hass.states.get("event.presence_conductor_stue_room_pass_by")
+    assert room_state.state != "unknown"
+    assert room_state.attributes["event_type"] == "pass_by"
+    assert room_state.attributes["zone_id"] == "sofakrok"
+    assert room_state.attributes["peak_probability"] == 0.9312
+    assert room_state.attributes["duration"] == 3.22
+    # The other room saw nothing.
+    assert hass.states.get("event.presence_conductor_kontor_room_pass_by").state == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +568,7 @@ async def test_pass_by_fires_bus_event_and_event_entity(hass: HomeAssistant, mon
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
 async def test_suppress_outputs_freezes_state_entities(hass: HomeAssistant, monkeypatch) -> None:
     _, controller, fake = await setup_conductor(hass, monkeypatch)
     occupancy = "binary_sensor.presence_conductor_sofakrok_occupancy"

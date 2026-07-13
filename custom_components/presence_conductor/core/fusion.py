@@ -44,12 +44,16 @@ def _refresh_rooms(engine: ConductorEngine) -> None:
         if not healthy:
             # 6.3: all members unknown -> publish unknown, not off.
             room.occupied = None
+            room.motion = None
             room.probability = None
             room.activity = None
             room.settled = None
             continue
         # 6.1: occupied iff any healthy member zone is occupied.
         room.occupied = any(zst.occupied for zst in healthy)
+        # 6.2: motion iff any healthy member zone's motion channel (4.4) is
+        # on — the same undamped fast channel, fused with OR.
+        room.motion = any(zst.motion for zst in healthy)
         # 6.1: noisy-OR over member posteriors, for diagnostics. Monotone by
         # construction (6.4).
         p_none = 1.0

@@ -45,6 +45,22 @@ class TestRule62RoomActivity:
         h.occupy(SOFAKROK)
         assert h.room("stue").settled is False
 
+    def test_rule_6_2_motion_follows_any_member_zone(self) -> None:
+        h = Harness()
+        assert h.room("stue").motion is False
+        h.occupy(SOFAKROK)  # strong gated move: motion on (4.4)
+        assert h.zone(SOFA).motion is True
+        assert not h.zone(BORD).motion  # the other member stays quiet
+        assert h.room("stue").motion is True
+
+    def test_rule_6_2_motion_releases_with_the_member_channel(self) -> None:
+        h = Harness()
+        h.occupy(SOFAKROK)
+        assert h.room("stue").motion is True
+        h.sustain_quiet(SOFAKROK, 10)  # motion_hold (5 s) expires within this
+        assert h.zone(SOFA).motion is False
+        assert h.room("stue").motion is False
+
 
 class TestRule63HealthExclusion:
     def test_rule_6_3_unknown_zone_is_excluded_from_fusion(self) -> None:
@@ -60,6 +76,7 @@ class TestRule63HealthExclusion:
         h.submit(SensorAvailability(KONTOR, available=False))
         room = h.room("kontor")
         assert room.occupied is None
+        assert room.motion is None
         assert room.probability is None
         assert room.activity is None
         assert room.settled is None

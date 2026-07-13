@@ -34,6 +34,7 @@ Responsibilities (docs/ENGINE_SPEC.md):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Mapping
@@ -56,12 +57,14 @@ from homeassistant.core import (
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
 from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_state_change_event,
     async_track_time_interval,
 )
 from homeassistant.helpers.start import async_at_started
+from homeassistant.util import slugify
 
 from .config import baselines_from_options, sensor_entities
 from .const import (
@@ -316,6 +319,11 @@ class PresenceConductorController:
         """Dispatcher signal carrying :class:`PassBy` events for one zone."""
         return f"{DOMAIN}_{self.entry.entry_id}_pass_by_{zone_id}"
 
+    def room_pass_by_signal(self, room_id: str) -> str:
+        """Dispatcher signal carrying :class:`PassBy` events of every member
+        zone of one room (rule 5.2 routed through §6 membership)."""
+        return f"{DOMAIN}_{self.entry.entry_id}_room_pass_by_{room_id}"
+
     @callback
     def submit(self, event: Event) -> None:
         """Feed one event through the engine and apply the resulting plan.
@@ -428,6 +436,11 @@ class PresenceConductorController:
                     },
                 )
                 async_dispatcher_send(self.hass, self.pass_by_signal(event.zone_id), event)
+                # Every pass-by also reaches the zone's room (§6 membership):
+                # the room event entity is the consumer surface, the zone
+                # entity the opt-in diagnostic.
+                room_id = self.config.zone(event.zone_id).room_id
+                async_dispatcher_send(self.hass, self.room_pass_by_signal(room_id), event)
             # BaselineRecorded rides on persist_calibration above; entities
             # (diagnostics) refresh through the publish below.
         self._publish(plan.suppress_outputs)
@@ -516,7 +529,7 @@ class PresenceConductorController:
 
 
 def conductor_device_info(entry: ConfigEntry) -> DeviceInfo:
-    """One shared hub device for all conductor entities."""
+    """The hub device: home-level outputs, controls and diagnostics."""
     return DeviceInfo(
         identifiers={(DOMAIN, entry.entry_id)},
         name="Presence Conductor",
@@ -526,12 +539,36 @@ def conductor_device_info(entry: ConfigEntry) -> DeviceInfo:
     )
 
 
+def room_device_info(controller: PresenceConductorController, room_id: str) -> DeviceInfo:
+    """One device per configured room, hanging off the hub via ``via_device``.
+
+    A room's presence signals — its own fused outputs (§6) and the outputs
+    of its member zones — are self-contained on this device, so a consumer
+    (a dashboard, a future sonos-conductor hookup) points at exactly one
+    device per room.
+    """
+    room_name = controller.room_name(room_id)
+    return DeviceInfo(
+        identifiers={(DOMAIN, f"{controller.entry.entry_id}_room_{room_id}")},
+        name=f"{room_name} presence",
+        manufacturer="Presence Conductor",
+        model="Bayesian mmWave occupancy estimator",
+        suggested_area=room_name,
+        via_device=(DOMAIN, controller.entry.entry_id),
+        entry_type=DeviceEntryType.SERVICE,
+    )
+
+
 class ConductorEntity(Entity):
     """Base for conductor entities: dispatcher-driven, never polled.
 
-    ``_attr_name`` values are hardcoded English on purpose: combined with the
-    hub device name they yield language-stable object ids like
-    ``binary_sensor.presence_conductor_sofakrok_occupancy``.
+    Entities with a ``room_id`` live on that room's device; the rest (home
+    outputs, controls, diagnostics) live on the hub.
+
+    ``_attr_name`` values are hardcoded English on purpose, and the object
+    id is pinned to the ``presence_conductor_`` scheme those names produce
+    (see :meth:`add_to_platform_start`), yielding language-stable object ids
+    like ``binary_sensor.presence_conductor_sofakrok_occupancy``.
     """
 
     _attr_should_poll = False
@@ -541,9 +578,31 @@ class ConductorEntity(Entity):
     #: so they keep updating while outputs are suppressed (rule 7.2).
     _control_surface = False
 
-    def __init__(self, controller: PresenceConductorController) -> None:
+    def __init__(self, controller: PresenceConductorController, room_id: str | None = None) -> None:
         self.controller = controller
-        self._attr_device_info = conductor_device_info(controller.entry)
+        self._attr_device_info = (
+            conductor_device_info(controller.entry)
+            if room_id is None
+            else room_device_info(controller, room_id)
+        )
+
+    @callback
+    def add_to_platform_start(
+        self,
+        hass: HomeAssistant,
+        platform: EntityPlatform,
+        parallel_updates: asyncio.Semaphore | None,
+    ) -> None:
+        """Suggest the object id before registration.
+
+        Object ids are the stable consumer contract; device grouping is
+        presentation. Without the explicit suggestion HA derives the object
+        id from the device name, so moving an entity from the hub to its
+        room device would rename it.
+        """
+        if self.entity_id is None:
+            self.entity_id = f"{platform.domain}.{slugify(f'Presence Conductor {self._attr_name}')}"
+        super().add_to_platform_start(hass, platform, parallel_updates)
 
     @property
     def engine_state(self) -> EngineState:
