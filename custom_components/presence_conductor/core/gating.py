@@ -1,10 +1,12 @@
 """Distance gating and unit hygiene (spec rules 1.4, 2).
 
-Gating keys on the reported *distance* alone, not the radar's binary target
-verdict: a sub-threshold still person keeps a reported distance while
+Gating keys on the reported *distance*, not the radar's binary target
+verdict — a sub-threshold still person keeps a reported distance while
 ``has_still_target`` is off, and rule 3.5 requires that margin to keep
-counting as evidence. The binary flags matter only for rule 2.3 (flag set,
-distance omitted) and rule 4.4's motion channel.
+counting as evidence. But the distance entity *freezes at the last
+target's location* when the flag drops (measured, rule 2.7), so a frozen
+distance is only usable for ``distance_hold`` after its flag was last on;
+past that it would attribute new energy to wherever someone last stood.
 
 Same-room separation (rule 2.2) is config-only: the mask is the *only*
 mechanism, and non-overlapping intervals between sensors sharing a room are
@@ -14,7 +16,7 @@ the operator's contract. There is no cross-sensor arbitration here.
 from __future__ import annotations
 
 from .events import GATE_COUNT, SensorFrame
-from .model import ConductorConfig, ZoneConfig
+from .model import ConductorConfig, SensorState, ZoneConfig
 
 
 def normalize_energy(value: float | None) -> float | None:
@@ -56,6 +58,27 @@ def clamp_distance(value: float | None) -> float | None:
     return max(0.0, value)
 
 
+def usable_distance(
+    distance_cm: float | None,
+    flag_on: bool,
+    flag_at: float | None,
+    now: float | None,
+    hold: float,
+) -> float | None:
+    """Rule 2.7: the reported distance, if it is still trustworthy.
+
+    Usable while the channel's target flag is on, and for at most ``hold``
+    seconds after the flag was last on. ``now = None`` (seed, 7.1) means
+    flag recency is unknown: only flag-on distances are usable.
+    """
+    distance = clamp_distance(distance_cm)  # 1.4
+    if distance is None or flag_on:
+        return distance
+    if now is not None and flag_at is not None and now - flag_at <= hold:
+        return distance  # 2.7: within the hold — 3.5's bridging window
+    return None  # 2.7: frozen and stale
+
+
 def in_zone(zone: ZoneConfig, distance_cm: float, margin_cm: float) -> bool:
     """Zone mask: ``distance in [near - margin, far + margin]`` (rule 2.1)."""
     return zone.near_cm - margin_cm <= distance_cm <= zone.far_cm + margin_cm
@@ -73,21 +96,38 @@ def default_zone(config: ConductorConfig, sensor_id: str) -> ZoneConfig | None:
     return min(zones, key=lambda z: z.near_cm)
 
 
-def gate_frame(config: ConductorConfig, frame: SensorFrame) -> dict[str, tuple[bool, bool]]:
+def gate_frame(
+    config: ConductorConfig,
+    frame: SensorFrame,
+    sensor: SensorState | None,
+    now: float | None,
+) -> dict[str, tuple[bool, bool]]:
     """Per zone of the frame's sensor: ``(move_gated, still_gated)``.
 
-    A frame with a distance outside every zone of its sensor contributes
-    nothing — the target belongs to another zone, another sensor's
-    territory, or is a ghost at an implausible range (rule 2.1).
+    A frame with a usable distance (2.7) outside every zone of its sensor
+    contributes nothing — the target belongs to another zone, another
+    sensor's territory, or is a ghost at an implausible range (rule 2.1).
     """
-    margin = config.tunables.margin_cm
-    move_d = clamp_distance(frame.moving_distance_cm)  # 1.4
-    still_d = clamp_distance(frame.still_distance_cm)  # 1.4
+    t = config.tunables
+    move_d = usable_distance(
+        frame.moving_distance_cm,
+        frame.has_moving_target,
+        None if sensor is None else sensor.move_flag_at,
+        now,
+        t.distance_hold,
+    )
+    still_d = usable_distance(
+        frame.still_distance_cm,
+        frame.has_still_target,
+        None if sensor is None else sensor.still_flag_at,
+        now,
+        t.distance_hold,
+    )
     gates: dict[str, list[bool]] = {}
     for zone in config.zones_for_sensor(frame.sensor_id):
         gates[zone.zone_id] = [
-            move_d is not None and in_zone(zone, move_d, margin),  # 2.1
-            still_d is not None and in_zone(zone, still_d, margin),  # 2.1
+            move_d is not None and in_zone(zone, move_d, t.margin_cm),  # 2.1
+            still_d is not None and in_zone(zone, still_d, t.margin_cm),  # 2.1
         ]
     # 2.3: a target flag without a distance is attributed to the default
     # zone, keeping single-zone sensors working when the device momentarily

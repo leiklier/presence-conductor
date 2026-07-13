@@ -20,13 +20,17 @@ class TestRule61RoomOccupancy:
         assert h.room("stue").occupied is True
         assert not h.zone(BORD).occupied  # the other sensor stays out of it
 
-    def test_rule_6_1_probability_is_noisy_or(self) -> None:
+    def test_rule_6_1_confidence_is_the_member_max(self) -> None:
+        # Not noisy-OR: member zones are strongly dependent (shared gates,
+        # the same person, cross-covering sensors), so independence-assuming
+        # combination overstates the room (6.1).
         h = Harness()
         h.occupy(SOFAKROK)
         h.occupy(SPISEBORD)
-        p1 = h.zone(SOFA).probability
-        p2 = h.zone(BORD).probability
-        assert h.room("stue").probability == pytest.approx(1 - (1 - p1) * (1 - p2))
+        p1 = h.zone(SOFA).confidence
+        p2 = h.zone(BORD).confidence
+        assert h.room("stue").confidence == pytest.approx(max(p1, p2))
+        assert h.room("stue").confidence < 1 - (1 - p1) * (1 - p2)
 
 
 class TestRule62RoomActivity:
@@ -77,7 +81,7 @@ class TestRule63HealthExclusion:
         room = h.room("kontor")
         assert room.occupied is None
         assert room.motion is None
-        assert room.probability is None
+        assert room.confidence is None
         assert room.activity is None
         assert room.settled is None
 
@@ -86,11 +90,12 @@ class TestRule64Monotone:
     def test_rule_6_4_a_zone_never_vetoes_another(self) -> None:
         h = Harness()
         h.occupy(SOFAKROK)
-        p_sofa = h.zone(SOFA).probability
         h.sustain_quiet(SPISEBORD, 10)  # strong absence at the other sensor
+        # Sofa saw no observations meanwhile, so its belief only relaxes
+        # toward the prior (3.8) — absence elsewhere never vetoes it (6.4).
+        assert h.zone(SOFA).occupied  # hysteresis holds through the decay
         assert h.room("stue").occupied is True
-        assert h.room("stue").probability >= h.zone(SOFA).probability * 0.99
-        assert h.zone(SOFA).probability == pytest.approx(p_sofa, abs=0.3)
+        assert h.room("stue").confidence >= h.zone(SOFA).confidence * 0.99
 
 
 class TestRule65HomePresence:
@@ -99,7 +104,7 @@ class TestRule65HomePresence:
         assert h.state.anyone_home is False
         h.occupy(SOFAKROK)
         assert h.state.anyone_home is True  # same submit, no tick needed
-        assert h.state.home_probability >= 0.8
+        assert h.state.home_confidence >= 0.8
 
     def test_rule_6_5_home_decays_much_slower_than_zones(self) -> None:
         h = Harness()
@@ -117,7 +122,7 @@ class TestRule65HomePresence:
         h.occupy(SOFAKROK)
         h.sustain(SOFAKROK, 120, **STRONG_STILL)
         assert h.state.anyone_home is True
-        assert h.state.home_probability == pytest.approx(0.999, abs=0.002)
+        assert h.state.home_confidence == pytest.approx(0.999, abs=0.002)
 
     def test_rule_6_5_all_zones_unhealthy_publishes_unknown(self) -> None:
         h = Harness()
@@ -125,6 +130,6 @@ class TestRule65HomePresence:
         for sensor in (KONTOR, SOFAKROK, SPISEBORD):
             h.submit(SensorAvailability(sensor, available=False))
         assert h.state.anyone_home is None
-        assert h.state.home_probability is None
+        assert h.state.home_confidence is None
         h.occupy(SOFAKROK)  # a frame recovers health immediately (1.3)
         assert h.state.anyone_home is True

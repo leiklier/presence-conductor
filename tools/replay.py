@@ -44,15 +44,17 @@ entities), each item shaped ``{"entity_id": ..., "state": ...,
 
 ``baselines``, ``tunables`` and the gate keys are optional. ``gates_move``/
 ``gates_still`` list per-gate energy entities by gate index (spec rules
-2.4-2.6); ``gate_size_cm`` (default 75.0, rule 2.4) and per-zone baseline
-``"gates"`` floors (rule 3.6) ride along. Distance entities are treated
-as ``None`` (rule 1.1) while the matching ``has_*_target`` binary is off,
-mirroring the adapter's frame contract; an ``unavailable``/``unknown``
-state on any of a sensor's aggregate entities marks the sensor unavailable
-until the next parseable update, while an unknown *gate* entity only blanks
-that gate — engineering mode dropping is normal, not sensor failure (rule
-2.6). Ticks are synthesized every ``tick_interval`` between recorded
-changes, and engine timers fire at their deadlines.
+2.4-2.6); ``gate_size_cm`` (default 75.0, rule 2.4), per-zone baseline
+``"gates"`` floors (rule 3.6) and ``"stats"`` statistic calibration (rule
+3.7) ride along. Frames carry the *last reported* value of every field
+exactly like the production adapter (rule 1.1) — distance freshness is the
+core's job (rule 2.7), so replay must not null distances on flag state. An
+``unavailable``/``unknown`` state on any of a sensor's aggregate entities
+marks the sensor unavailable until the next parseable update, while an
+unknown *gate* entity only blanks that gate — engineering mode dropping is
+normal, not sensor failure (rule 2.6). Ticks are synthesized every
+``tick_interval`` between recorded changes, and engine timers fire at
+their deadlines.
 
 Pure Python: imports only the core package and the standard library.
 """
@@ -98,6 +100,7 @@ from custom_components.presence_conductor.core.model import (  # noqa: E402
     InitialSnapshot,
     RoomConfig,
     SensorConfig,
+    StatBaseline,
     Tunables,
     ZoneBaselines,
     ZoneConfig,
@@ -227,6 +230,10 @@ class _SensorShadow:
         #: and reported" contract (rule 1.1).
         self.gates: dict[str, list[float | None] | None] = {"move": None, "still": None}
         self.available = True
+        #: Observation clock (rule 1.1), advanced per recorded entity change.
+        self.move_obs = 0
+        self.still_obs = 0
+        self.move_energy_obs = 0
 
     def set_gate(self, role: str, value: float | None) -> None:
         """Fold one per-gate update (``gate_move:3``) into the shadow."""
@@ -242,22 +249,19 @@ class _SensorShadow:
         def _flag(role: str) -> bool:
             return bool(v.get(role) or False)
 
-        def _distance(role: str, flag_role: str) -> float | None:
+        def _distance(role: str) -> float | None:
+            # Rule 1.1: the last reported value, verbatim — identical to the
+            # production adapter's cached view. Freshness is the core's job
+            # (rule 2.7).
             distance = v.get(role)
-            if distance is None:
-                return None
-            # Rule 1.1: no target of that kind -> no distance. Only enforced
-            # when the flag entity is actually mapped and reporting False.
-            if v.get(flag_role) is False:
-                return None
-            return float(distance)
+            return None if distance is None else float(distance)
 
         gate_move = self.gates["move"]
         gate_still = self.gates["still"]
         return SensorFrame(
             sensor_id=sensor_id,
-            moving_distance_cm=_distance("moving_distance", "has_moving_target"),
-            still_distance_cm=_distance("still_distance", "has_still_target"),
+            moving_distance_cm=_distance("moving_distance"),
+            still_distance_cm=_distance("still_distance"),
             move_energy=None if v.get("move_energy") is None else float(v["move_energy"]),
             still_energy=None if v.get("still_energy") is None else float(v["still_energy"]),
             has_target=_flag("has_target")
@@ -267,6 +271,9 @@ class _SensorShadow:
             has_still_target=_flag("has_still_target"),
             gate_move=None if gate_move is None else tuple(gate_move),
             gate_still=None if gate_still is None else tuple(gate_still),
+            move_obs=self.move_obs,
+            still_obs=self.still_obs,
+            move_energy_obs=self.move_energy_obs,
         )
 
 
@@ -304,6 +311,17 @@ def replay(
                         still_sigma=g["still_sigma"],
                     )
                     for index, g in (b.get("gates") or {}).items()
+                },
+                # Rule 3.7: optional statistic calibration, keyed like the
+                # config entry.
+                stats={
+                    key: StatBaseline(
+                        mu=s["mu"],
+                        sigma=s["sigma"],
+                        clip_mu=s.get("clip_mu", 0.0),
+                        tau=s.get("tau", 1.0),
+                    )
+                    for key, s in (b.get("stats") or {}).items()
                 },
             )
             for zone_id, b in (baselines or {}).items()
@@ -360,6 +378,28 @@ def replay(
         sensor_id, role = entity_map[entity_id]
         shadow = shadows[sensor_id]
         parseable, value = _parse_state(role, state)
+        if parseable:
+            # 1.1 observation clock: every recorded change of a channel's
+            # entity is one reported measurement — valid under the verified
+            # firmware guarantee (atomic radar frames, throttle-only
+            # filters), exactly as in the live adapter. The attack counter
+            # stays energy-only (4.2).
+            if role.startswith(f"{_GATE_ROLE_PREFIX}move") or role in (
+                "move_energy",
+                "moving_distance",
+                "has_moving_target",
+                "has_target",
+            ):
+                shadow.move_obs += 1
+            if role.startswith(f"{_GATE_ROLE_PREFIX}still") or role in (
+                "still_energy",
+                "still_distance",
+                "has_still_target",
+                "has_target",
+            ):
+                shadow.still_obs += 1
+            if role.startswith(f"{_GATE_ROLE_PREFIX}move") or role == "move_energy":
+                shadow.move_energy_obs += 1
         if role.startswith(_GATE_ROLE_PREFIX):
             # An unknown gate is normal (engineering mode off): the gate
             # goes None and sensor availability is untouched — rule 1.3

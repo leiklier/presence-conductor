@@ -20,7 +20,7 @@ mutable state, and every iteration follows config declaration order.
 
 from __future__ import annotations
 
-from . import activity, evidence, fusion, gating, health, timers
+from . import activity, evidence, fusion, gating, health, stats, timers
 from . import filter as filter_
 from .belief import logit
 from .events import (
@@ -67,11 +67,22 @@ class ConductorEngine:
             )
             for zone in config.zones
         }
+        #: Fast-attack candidacy thresholds on the raw statistic (rule 4.2):
+        #: per zone, ``(gate path, aggregate path)`` — analytic tail values,
+        #: never taken from a calibration window.
+        tail = t.attack_tail_ppm * 1e-6
+        self.attack_thresholds: dict[str, tuple[float, float]] = {
+            zone.zone_id: (
+                stats.attack_threshold(len(self.owned_gates[zone.zone_id]), tail),
+                stats.attack_threshold(1, tail),
+            )
+            for zone in config.zones
+        }
         #: Timer keys the engine believes are pending at the adapter.
         self._pending_timers: set[str] = set()
         #: Home-presence hysteresis latch (6.5).
         self._home_on: bool = False
-        #: Timestamp of the last tick integration (rule 4.1's dt).
+        #: Timestamp of the last chronological advance (rule 4.1's dt).
         self._last_advance: float | None = None
         self.state = EngineState()
         self._seed(snapshot)
@@ -94,7 +105,7 @@ class ConductorEngine:
         for zone in self.config.zones:
             persisted = snapshot.baselines.get(zone.zone_id)
             zst = ZoneState(
-                lam=self.lam_prior,  # 7.1: posteriors start at the prior
+                lam=self.lam_prior,  # 7.1: beliefs start at the prior
                 move_baseline=ChannelStats(persisted.move_mu, persisted.move_sigma)
                 if persisted
                 else ChannelStats(t.default_mu, t.default_sigma),
@@ -109,6 +120,10 @@ class ConductorEngine:
                     gate = persisted.gates[index]
                     zst.gate_move_baselines[index] = ChannelStats(gate.move_mu, gate.move_sigma)
                     zst.gate_still_baselines[index] = ChannelStats(gate.still_mu, gate.still_sigma)
+                # 3.7: persisted statistic calibration; missing keys (and
+                # pre-3.7 baselines) fall back to the analytic values.
+                for key in sorted(persisted.stats):
+                    zst.stat_cal[key] = persisted.stats[key]
             if not state.sensors[zone.sensor_id].available:
                 zst.health = Health.UNKNOWN  # 1.3
             state.zones[zone.zone_id] = zst
@@ -124,7 +139,14 @@ class ConductorEngine:
             frame = snapshot.frames.get(sensor.sensor_id)
             if frame is None:
                 continue
-            evidence.ingest_frame(self, frame)
+            # now=None (2.7): flag recency unknown at seed, so only flag-on
+            # distances gate. Observation counters adopt without recency
+            # (1.1): channels stay silent until the first live frame.
+            sensor_state = state.sensors[sensor.sensor_id]
+            sensor_state.move_obs = frame.move_obs
+            sensor_state.still_obs = frame.still_obs
+            sensor_state.move_energy_obs = frame.move_energy_obs
+            evidence.ingest_frame(self, frame, None)
             for zone in self.config.zones_for_sensor(sensor.sensor_id):
                 zst = state.zones[zone.zone_id]
                 gated_target = (frame.has_moving_target and zst.move_gated) or (
@@ -163,14 +185,17 @@ class ConductorEngine:
     def submit(self, event: Event, now: float) -> Plan:
         """Process one event and return the resulting plan."""
         plan = self._plan()
+        dt = self._advance(now, plan)  # 4.1: chronology before the event's effect
         match event:
             case SensorFrame():
                 self._on_frame(event, now, plan)
             case Tick():
-                self._on_tick(now, plan)
+                # 4.1 made ticks pure clock: integration already happened in
+                # _advance. What remains is the tick-aligned calibration
+                # sampling (3.3).
+                evidence.collect_baseline_rows(self)
             case SensorAvailability():
-                health.on_availability(self, event, now, plan)
-                fusion.refresh(self, now)  # 6.3 exclusion may change fusion
+                health.on_availability(self, event, now, plan)  # 1.3
             case SetEnabled():
                 # 7.2: while off the engine keeps ingesting and updating
                 # (re-enable is warm); only publication is suppressed, which
@@ -180,6 +205,7 @@ class ConductorEngine:
                 evidence.on_record_baseline(self, event, now, plan)  # 3.3
             case _:  # unknown event types are ignored
                 pass
+        fusion.refresh(self, now, dt)  # 6 (home decay over dt, 6.5)
         return self._finish(plan)
 
     def on_timer(self, key: str, now: float) -> Plan:
@@ -188,20 +214,35 @@ class ConductorEngine:
         if key not in self._pending_timers:
             return self._finish(plan)  # stale or unknown timer key
         self._pending_timers.discard(key)
+        dt = self._advance(now, plan)  # 4.1: chronology before the timer's effect
         if key.startswith(timers.SENSOR_STALE_PREFIX):
             health.on_stale(self, key.removeprefix(timers.SENSOR_STALE_PREFIX), now, plan)  # 1.3
-            fusion.refresh(self, now)  # 6.3
         elif key.startswith(timers.MOTION_OFF_PREFIX):
             # 4.4: motion hold expiry.
             filter_.on_motion_off(self, key.removeprefix(timers.MOTION_OFF_PREFIX), now, plan)
         elif key.startswith(timers.BASELINE_END_PREFIX):
             # 3.3: calibration window closes.
             evidence.on_baseline_end(self, key.removeprefix(timers.BASELINE_END_PREFIX), now, plan)
+        fusion.refresh(self, now, dt)  # 6 / 6.3 / 6.5
         return self._finish(plan)
 
     # ------------------------------------------------------------------
     # Handlers
     # ------------------------------------------------------------------
+
+    def _advance(self, now: float, plan: Plan) -> float:
+        """Rule 4.1: integrate every zone from the last advance to ``now``
+        using the evidence that was in force during that interval — before
+        the current input installs anything new. Returns the elapsed dt."""
+        last = self._last_advance if self._last_advance is not None else now
+        dt = max(0.0, now - last)
+        self._last_advance = max(last, now)
+        if dt > 0.0:
+            for zone in self.config.zones:  # config order (7.3)
+                zst = self.state.zones[zone.zone_id]
+                filter_.advance_zone(self, zone, zst, dt, now, plan)  # 4.1
+                activity.tick_zone(self, zone, zst, now)  # 5
+        return dt
 
     def _on_frame(self, frame: SensorFrame, now: float, plan: Plan) -> None:
         if frame.sensor_id not in self.state.sensors:
@@ -209,22 +250,8 @@ class ConductorEngine:
         health.on_frame(self, frame.sensor_id, now, plan)  # 1.3 first: recovery
         evidence.apply_frame(self, frame, now)  # 1.4, 2, 3.2-3.4
         filter_.on_frame(self, frame, now, plan)  # 4.2, 4.4
-        # 6.5: occupancy raised by fast attack lifts home presence on the
-        # same frame (dt=0: events never decay it).
-        fusion.refresh(self, now)
-
-    def _on_tick(self, now: float, plan: Plan) -> None:
-        # 1.2: all time-driven behavior advances on ticks and event
-        # timestamps; integration uses the actual elapsed time.
-        last = self._last_advance if self._last_advance is not None else now
-        dt = max(0.0, now - last)
-        self._last_advance = now
-        if dt > 0.0:
-            for zone in self.config.zones:  # config order (7.3)
-                zst = self.state.zones[zone.zone_id]
-                filter_.tick_zone(self, zone, zst, dt, now, plan)  # 4.1
-                activity.tick_zone(self, zone, zst, now)  # 5
-        fusion.refresh(self, now, dt)  # 6 (home decay, 6.5)
+        # 6.5: submit()'s fusion refresh runs after this, so occupancy
+        # raised by fast attack lifts home presence on the same frame.
 
     # ------------------------------------------------------------------
     # Plumbing

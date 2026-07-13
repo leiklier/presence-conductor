@@ -1,6 +1,6 @@
 """Activity classification and pass-by (spec rule 5).
 
-A per-zone FSM driven by the posterior (via the occupied hysteresis) and
+A per-zone FSM driven by the belief (via the occupied hysteresis) and
 channel dominance: ``EMPTY -> PASSING -> ACTIVE / SETTLED`` (5.1). The
 ``occupied`` binary includes PASSING (5.3) — consumers that must not react
 to walk-throughs key on ``activity`` instead; that split, not suppression
@@ -24,7 +24,7 @@ def on_occupied(zst: ZoneState, now: float) -> None:
     zst.activity = Activity.PASSING  # 5.1
     zst.occupied_since = now
     zst.dwell_seconds = 0.0  # 5.4: dwell counts continuous occupancy
-    zst.peak_probability = zst.probability  # 5.2 payload
+    zst.peak_confidence = zst.confidence  # 5.2 payload
     zst.still_dominant_since = None
     zst.move_dominant_since = None
 
@@ -33,13 +33,13 @@ def on_vacated(zone: ZoneConfig, zst: ZoneState, now: float, plan: Plan) -> None
     """Occupancy turned off: back to EMPTY, maybe emitting pass_by (5.2)."""
     if zst.activity is Activity.PASSING and zst.occupied_since is not None:
         # 5.2: EMPTY reached *from* PASSING emits pass_by with the zone's
-        # peak probability and traversal duration. From ACTIVE/SETTLED it
+        # peak confidence and traversal duration. From ACTIVE/SETTLED it
         # does not.
-        plan.emit(PassBy(zone.zone_id, zst.peak_probability, now - zst.occupied_since))
+        plan.emit(PassBy(zone.zone_id, zst.peak_confidence, now - zst.occupied_since))
     zst.activity = Activity.EMPTY  # 5.1
     zst.occupied_since = None
     zst.dwell_seconds = 0.0  # 5.4: reset on EMPTY
-    zst.peak_probability = 0.0
+    zst.peak_confidence = 0.0
     zst.still_dominant_since = None
     zst.move_dominant_since = None
 
@@ -53,12 +53,14 @@ def tick_zone(engine: ConductorEngine, zone: ZoneConfig, zst: ZoneState, now: fl
     t = engine.config.tunables
     zst.dwell_seconds = now - zst.occupied_since  # 5.4
 
-    # Channel dominance (5.1), weighted like the evidence model (3.2). A
-    # dominance clock starts when its channel takes the lead and is cleared
-    # only by the opposite channel taking over; quiet frames (posterior held
-    # by decay alone) leave the clocks running.
-    move_score = t.k_move * zst.z_move
-    still_score = t.k_still * zst.z_still
+    # Channel dominance (5.1), weighted like the evidence model (3.2) on
+    # the positive parts of the centered scores. Dominance must be
+    # continuous: a clock runs only while its channel's positive score
+    # leads; when neither channel dominates (quiet or equal evidence) both
+    # clocks reset — one dominant frame followed by silence must not mature
+    # into a takeover t_settle later.
+    move_score = t.k_move * max(0.0, zst.z_move)
+    still_score = t.k_still * max(0.0, zst.z_still)
     if still_score > move_score and still_score > 0.0:
         if zst.still_dominant_since is None:
             zst.still_dominant_since = now
@@ -67,6 +69,9 @@ def tick_zone(engine: ConductorEngine, zone: ZoneConfig, zst: ZoneState, now: fl
         if zst.move_dominant_since is None:
             zst.move_dominant_since = now
         zst.still_dominant_since = None
+    else:  # 5.1: no channel dominates — reset both clocks
+        zst.still_dominant_since = None
+        zst.move_dominant_since = None
 
     still_takeover = (
         zst.still_dominant_since is not None and now - zst.still_dominant_since >= t.t_settle

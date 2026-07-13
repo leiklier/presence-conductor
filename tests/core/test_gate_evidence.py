@@ -11,6 +11,7 @@ from custom_components.presence_conductor.core.model import (
     ConductorConfig,
     GateBaselines,
     SensorConfig,
+    Tunables,
     ZoneConfig,
 )
 
@@ -22,6 +23,8 @@ from .harness import (
     SIGMA,
     Harness,
     calibrated_gate_floors,
+    centered_of,
+    centered_of_raw,
     frame,
     gate_tuple,
     make_config,
@@ -31,8 +34,9 @@ from .harness import (
 
 def make_harness(**tunable_overrides: float) -> Harness:
     """Default config with every gate calibrated like the aggregates, so the
-    harness's raw-energy-to-z table applies to gate energies too."""
-    config = make_config(**tunable_overrides)
+    harness's raw-energy-to-z table applies to gate energies too. Gate
+    evidence is experimental (2.6): these tests opt in."""
+    config = make_config(use_gate_evidence=True, **tunable_overrides)
     return Harness(config, make_snapshot(config, gate_floors=calibrated_gate_floors(config)))
 
 
@@ -72,17 +76,20 @@ class TestRule25GateEvidence:
     def test_rule_2_5_zone_gate_evidence_is_the_max_not_the_sum(self) -> None:
         h = make_harness()
         h.send_frame(KONTOR, gate_move=gate_tuple({1: 10, 2: 12.5}))
-        assert h.zone(DESK).z_move == pytest.approx(1.5)  # max(1.0, 1.5), not 2.5
+        # Raw S = max(1.0, 1.5), not 2.5; centered for the desk's three
+        # owned gates (3.7 analytic fallback).
+        assert h.zone(DESK).z_move == pytest.approx(centered_of(1.5, m=3))
 
     def test_rule_2_5_each_gate_scores_against_its_own_floor(self) -> None:
-        config = make_config()
+        config = make_config(use_gate_evidence=True)
         floors = calibrated_gate_floors(config)
         floors[DOOR] = {**floors[DOOR], 4: GateBaselines(0.40, 0.05, 0.40, 0.05)}
         h = Harness(config, make_snapshot(config, gate_floors=floors))
         h.send_frame(KONTOR, gate_move=gate_tuple({4: 40}))
-        assert h.zone(DOOR).z_move == 0.0  # at gate 4's own elevated floor (3.6)
+        # At gate 4's own elevated floor (3.6): raw S = 0 centers negative.
+        assert h.zone(DOOR).z_move == pytest.approx(centered_of(0.0, m=3))
         h.send_frame(KONTOR, gate_move=gate_tuple({3: 40}))
-        assert h.zone(DOOR).z_move == pytest.approx(6.0)  # sibling gate: z_cap
+        assert h.zone(DOOR).z_move == pytest.approx(centered_of(7.0, m=3))  # sibling
 
     def test_rule_2_5_two_people_in_two_zones_of_one_sensor(self) -> None:
         h = make_harness()
@@ -90,15 +97,16 @@ class TestRule25GateEvidence:
         # (door): both zones are credited at once - impossible in the
         # single-distance model (2.1), which reports one distance per kind.
         h.send_frame(KONTOR, gate_move=gate_tuple({1: 35, 4: 35}))
-        assert h.zone(DESK).occupied  # 4.2 on the gate move z
+        h.send_frame(KONTOR, gate_move=gate_tuple({1: 36, 4: 36}), at=h.now + 0.3)
+        assert h.zone(DESK).occupied  # 4.2 (confirmed) on the gate move score
         assert h.zone(DOOR).occupied
 
     def test_rule_2_5_uncalibrated_gates_use_the_tunables_defaults(self) -> None:
-        config = make_config()
+        config = make_config(use_gate_evidence=True)
         h = Harness(config, make_snapshot(config))  # no persisted gate floors
         h.send_frame(KONTOR, gate_move=gate_tuple({1: 15}, fill=10.0))
-        # default_mu 0.10, default_sigma 0.10: raw 10 -> z 0, raw 15 -> z 0.5.
-        assert h.zone(DESK).z_move == pytest.approx(0.5)
+        # default_mu 0.10, default_sigma 0.10: raw 10 -> 0, raw 15 -> S 0.5.
+        assert h.zone(DESK).z_move == pytest.approx(centered_of(0.5, m=3))
 
 
 class TestRule26GatePrecedence:
@@ -108,7 +116,7 @@ class TestRule26GatePrecedence:
         # distance); the frame's gates say the zone is quiet, and they win.
         h.send_frame(KONTOR, move_d=100, move_e=35, moving=True, gate_move=gate_tuple())
         desk = h.zone(DESK)
-        assert desk.z_move == 0.0
+        assert desk.z_move == pytest.approx(centered_of(0.0, m=3))  # quiet gates
         assert not desk.move_gated
         assert not desk.occupied  # no fast attack either (4.2)
         lam_before = desk.lam
@@ -122,8 +130,9 @@ class TestRule26GatePrecedence:
         # Engineering mode drops: the very next frame has no gate data and
         # the aggregate path applies unchanged - no mode latch.
         h.send_frame(KONTOR, move_d=100, move_e=35, moving=True)
-        assert h.zone(DESK).z_move == pytest.approx(6.0)
-        assert h.zone(DESK).occupied  # 4.2
+        assert h.zone(DESK).z_move == pytest.approx(centered_of_raw(35))
+        h.send_frame(KONTOR, move_d=100, move_e=36, moving=True, at=h.now + 0.3)
+        assert h.zone(DESK).occupied  # 4.2 (confirmed, fresh)
 
     def test_rule_2_6_all_owned_gates_unknown_falls_back_per_zone(self) -> None:
         h = make_harness()
@@ -138,31 +147,33 @@ class TestRule26GatePrecedence:
         )
         desk, door = h.zone(DESK), h.zone(DOOR)
         assert not desk.move_from_gates
-        assert desk.z_move == pytest.approx(6.0)  # aggregate (2.1-2.3)
+        assert desk.z_move == pytest.approx(centered_of_raw(35))  # aggregate
         assert door.move_from_gates
-        assert door.z_move == pytest.approx(6.0)  # gate 4 (2.5)
+        assert door.z_move == pytest.approx(centered_of(6.0, m=3))  # gate 4 (2.5)
 
     def test_rule_2_6_channels_fall_back_independently(self) -> None:
         h = make_harness()
         h.send_frame(KONTOR, still_d=100, still_e=35, still=True, gate_move=gate_tuple())
         desk = h.zone(DESK)
-        assert desk.z_move == 0.0  # move channel: quiet gates
-        assert desk.z_still == pytest.approx(6.0)  # still channel: aggregate
+        assert desk.z_move == pytest.approx(centered_of(0.0, m=3))  # quiet gates
+        assert desk.z_still == pytest.approx(centered_of_raw(35))  # aggregate
 
     def test_rule_2_6_zone_without_owned_gates_stays_on_the_aggregate_path(self) -> None:
         config = ConductorConfig(
             sensors=(SensorConfig(KONTOR, "Kontor", gate_size_cm=20.0),),
             zones=(ZoneConfig("far_zone", "Far", KONTOR, room_id="r", near_cm=500, far_cm=600),),
+            tunables=Tunables(use_gate_evidence=True),
         )
         h = Harness(config, make_snapshot(config))
         assert h.engine.owned_gates["far_zone"] == ()  # 2.4
         h.send_frame(KONTOR, move_d=550, move_e=35, moving=True, gate_move=gate_tuple({1: 35}))
-        assert h.zone("far_zone").z_move == pytest.approx(6.0)  # aggregate (2.6)
+        assert h.zone("far_zone").z_move == pytest.approx(centered_of_raw(35))  # 2.6
 
     def test_rule_2_6_fast_attack_rides_the_gate_move_z(self) -> None:
         h = make_harness()
-        h.send_frame(KONTOR, gate_move=gate_tuple({1: 20}))  # z = 3.0 = z_attack
-        assert h.zone(DESK).occupied  # 4.2: immediately, no tick needed
+        h.send_frame(KONTOR, gate_move=gate_tuple({1: 35}))  # raw 6 >= tail threshold
+        h.send_frame(KONTOR, gate_move=gate_tuple({1: 36}), at=h.now + 0.3)  # fresh
+        assert h.zone(DESK).occupied  # 4.2: confirmed, no tick needed
 
     def test_rule_2_6_motion_keys_on_gate_z_not_the_global_flag(self) -> None:
         h = make_harness()
@@ -171,11 +182,11 @@ class TestRule26GatePrecedence:
         h.send_frame(KONTOR, move_d=100, moving=True, gate_move=gate_tuple())
         assert not h.zone(DESK).motion
         # An owned gate above z_motion turns motion on without any flag.
-        h.send_frame(KONTOR, gate_move=gate_tuple({1: 13}))  # z = 1.6
+        h.send_frame(KONTOR, gate_move=gate_tuple({1: 20}))  # centered 3.1
         assert h.zone(DESK).motion
 
     def test_rule_2_6_startup_adoption_is_spatial_with_gates(self) -> None:
-        config = make_config()
+        config = make_config(use_gate_evidence=True)
         snapshot = make_snapshot(
             config,
             gate_floors=calibrated_gate_floors(config),
@@ -191,9 +202,9 @@ class TestRule26GatePrecedence:
 class TestRule36PerGateFloors:
     def test_rule_3_6_record_baseline_replaces_per_gate_floors(self) -> None:
         h = make_harness()
-        h.submit(RecordBaseline(DESK, duration=20.0))
-        assert h.deadlines[timers.baseline_end(DESK)] == pytest.approx(20.0)
-        raw = [8, 9, 10, 11, 12] * 4
+        h.submit(RecordBaseline(DESK, duration=80.0))
+        assert h.deadlines[timers.baseline_end(DESK)] == pytest.approx(80.0)
+        raw = [8, 9, 10, 11, 12] * 16
         raw[3] = 90  # a person walks through: brief violations don't poison
         for value in raw:
             h.send_frame(
@@ -202,11 +213,13 @@ class TestRule36PerGateFloors:
                 gate_still=gate_tuple({1: value, 2: None}),
             )
             h.step_to(h.now + 1.0)
-        h.run(5)  # window closes at t=20 during this run
+        h.run(5)  # window closes at t=80 during this run
         desk = h.zone(DESK)
         assert desk.recording is None
         assert desk.gate_move_baselines[1].mu == pytest.approx(0.10, abs=0.011)
-        assert 0.02 <= desk.gate_move_baselines[1].sigma <= 0.03  # MAD, floored (3.1)
+        # 3.1: dependence-discounted UCB of the deviations + half quantum,
+        # times 1.4826.
+        assert desk.gate_move_baselines[1].sigma == pytest.approx(1.4826 * 0.025, abs=0.002)
         assert desk.gate_still_baselines[1].mu == pytest.approx(0.10, abs=0.011)
         # Gate 2 reported nothing during the window: previous floor kept.
         assert desk.gate_move_baselines[2].mu == pytest.approx(MU)
@@ -214,7 +227,7 @@ class TestRule36PerGateFloors:
         assert h.persist_count == 1  # 3.3: baselines persist in the config entry
 
     def test_rule_3_6_adaptation_extends_per_gate_for_owned_gates(self) -> None:
-        config = make_config(t_background=60.0, tau_background=600.0)
+        config = make_config(use_gate_evidence=True, t_background=60.0, tau_background=600.0)
         h = Harness(config, make_snapshot(config, gate_floors=calibrated_gate_floors(config)))
         h.run(61)  # posterior below p_background since start: now eligible
         for _ in range(100):
@@ -228,10 +241,11 @@ class TestRule36PerGateFloors:
         assert desk.gate_move_baselines[5].mu == MU
 
     def test_rule_3_6_adaptation_freezes_the_moment_the_posterior_rises(self) -> None:
-        config = make_config(t_background=60.0, tau_background=600.0)
+        config = make_config(use_gate_evidence=True, t_background=60.0, tau_background=600.0)
         h = Harness(config, make_snapshot(config, gate_floors=calibrated_gate_floors(config)))
         h.run(61)
-        h.send_frame(KONTOR, gate_move=gate_tuple({1: 35}))  # 4.2: posterior jumps
+        h.send_frame(KONTOR, gate_move=gate_tuple({1: 35}))  # 4.2 candidate
+        h.send_frame(KONTOR, gate_move=gate_tuple({1: 36}), at=h.now + 0.3)  # confirmed
         desk = h.zone(DESK)
         assert desk.below_since is None  # clock reset immediately (3.4)
         mu_before = desk.gate_move_baselines[1].mu
@@ -244,7 +258,7 @@ class TestRule36PerGateFloors:
         """The headline improvement (3.6): a fan parked at door gate 4 whose
         elevated still floor was calibrated produces z = 0 at its own gate,
         so hours of fan energy never flip the zone."""
-        config = make_config()
+        config = make_config(use_gate_evidence=True)
         floors = calibrated_gate_floors(config)
         floors[DOOR] = {**floors[DOOR], 4: GateBaselines(MU, SIGMA, 0.40, 0.05)}
         h = Harness(config, make_snapshot(config, gate_floors=floors))
@@ -260,7 +274,7 @@ class TestRule36PerGateFloors:
             h.step_to(h.now + 1.0)
         door = h.zone(DOOR)
         assert not door.occupied
-        assert door.probability < 0.05  # held at the empty prior
+        assert door.confidence < 0.05  # held at the empty prior
 
     def test_rule_3_6_same_fan_on_the_aggregate_path_would_false_positive(self) -> None:
         """The v0.1.0 contrast: identical energies without gate data run
@@ -273,7 +287,7 @@ class TestRule36PerGateFloors:
         assert h.zone(DOOR).occupied  # z_still = 6 against the zone floor
 
     def test_rule_3_6_persisted_gate_floors_seed_the_engine(self) -> None:
-        config = make_config()
+        config = make_config(use_gate_evidence=True)
         floors = {DESK: {2: GateBaselines(0.2, 0.03, 0.3, 0.04)}}
         h = Harness(config, make_snapshot(config, gate_floors=floors))
         desk = h.zone(DESK)
@@ -284,7 +298,7 @@ class TestRule36PerGateFloors:
     def test_rule_3_6_v0_1_0_baselines_without_gates_load_unchanged(self) -> None:
         h = Harness()  # default snapshot: ZoneBaselines carry no gates
         assert h.zone(DESK).gate_move_baselines == {}
-        h.send_frame(KONTOR, move_d=100, move_e=35, moving=True)
+        h.occupy(KONTOR)
         assert h.zone(DESK).occupied  # the aggregate estimator is untouched
 
     def test_rule_7_3_gate_frames_are_deterministic(self) -> None:

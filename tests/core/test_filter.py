@@ -13,8 +13,10 @@ from .harness import DESK, KONTOR, SOFA, SOFAKROK, Harness, make_config, make_sn
 
 class TestRule41LogOddsUpdate:
     def test_rule_4_1_decay_relaxes_toward_the_prior(self) -> None:
-        # k_absence = 0 isolates the pure relaxation of rule 4.1.
-        config = make_config(k_absence=0.0)
+        # Zero weights and bias make u = 0, isolating the pure relaxation
+        # of 4.1; the attack path is weight-independent (raw-statistic
+        # candidacy), so occupy() still latches.
+        config = make_config(k_bias=0.0, k_move=0.0, k_still=0.0)
         h = Harness(config, make_snapshot(config))
         h.occupy(KONTOR)  # lambda -> lam_attack (4.2)
         h.submit(quiet(KONTOR))  # zero the stored evidence
@@ -27,21 +29,91 @@ class TestRule41LogOddsUpdate:
     def test_rule_4_1_no_fixed_timeout_evidence_holds_indefinitely(self) -> None:
         h = Harness()
         h.occupy(SOFAKROK)
-        # Weak but real still evidence beats the decay pull: occupancy holds
-        # for 5 minutes with no fixed timeout anywhere.
-        h.sustain(SOFAKROK, 300, still_d=100, still_e=15)
+        # Real still evidence beats the decay pull: occupancy holds for
+        # 5 minutes with no fixed timeout anywhere.
+        h.sustain(SOFAKROK, 300, still_d=100, still_e=15, still=True)
         assert h.zone(SOFA).occupied
 
 
 class TestRule42FastAttack:
-    def test_rule_4_2_strong_move_evidence_flips_on_the_same_frame(self) -> None:
+    def test_rule_4_2_confirmed_attack_flips_without_a_tick(self) -> None:
         h = Harness()
-        h.send_frame(KONTOR, move_d=100, move_e=20, moving=True)  # z == z_attack
+        h.send_frame(KONTOR, move_d=100, move_e=25, moving=True)  # candidate
         desk = h.zone(DESK)
-        assert desk.occupied  # before any tick: sensor publish latency only
-        assert desk.motion  # 4.4 rides the same frame
-        assert desk.lam == pytest.approx(h.engine.lam_attack)
+        assert not desk.occupied  # 4.2: one observation is not an attack
+        assert desk.motion  # 4.4 rides the first frame
+        h.send_frame(KONTOR, move_d=100, move_e=26, moving=True, at=0.3)  # fresh
+        assert desk.occupied  # confirmed: still before any tick
+        assert desk.lam >= h.engine.lam_attack
         assert h.state.anyone_home is True  # 6.5: rises immediately
+
+    def test_rule_4_2_repeated_cached_frames_are_not_observations(self) -> None:
+        """A held move spike re-presented by unrelated entity changes must
+        not confirm the attack: elapsed time alone proves nothing (4.2)."""
+        h = Harness()
+        h.send_frame(KONTOR, move_d=100, move_e=25, moving=True)  # candidate
+        # Unrelated still-channel updates re-emit the identical move view:
+        # the still counter advances, the move-energy counter does not.
+        h.send_frame(
+            KONTOR,
+            move_d=100,
+            move_e=25,
+            moving=True,
+            still_e=10,
+            at=0.5,
+            fresh_move=False,
+            fresh_move_energy=False,
+        )
+        h.send_frame(
+            KONTOR,
+            move_d=100,
+            move_e=25,
+            moving=True,
+            still_e=11,
+            at=1.0,
+            fresh_move=False,
+            fresh_move_energy=False,
+        )
+        assert not h.zone(DESK).occupied  # no fresh move measurement arrived
+
+    def test_rule_4_2_gap_bounds_the_confirmation(self) -> None:
+        # Zero evidence weights make the belief inert, isolating the attack
+        # path (it keys on the raw candidate condition, not the weights).
+        # Energies alternate so every frame is a fresh observation (4.2).
+        config = make_config(k_move=0.0, k_still=0.0, k_bias=0.0)
+        h = Harness(config, make_snapshot(config))
+        h.send_frame(KONTOR, move_d=100, move_e=25, moving=True)
+        # Too close: within one radar burst — not a distinct observation.
+        h.send_frame(KONTOR, move_d=100, move_e=26, moving=True, at=0.1)
+        assert not h.zone(DESK).occupied
+        # Too late: the chain expired and this observation restarts it.
+        h.send_frame(KONTOR, move_d=100, move_e=25, moving=True, at=5.0)
+        assert not h.zone(DESK).occupied
+        # A fresh non-qualifying move observation resets the count.
+        h.send_frame(KONTOR, move_d=100, move_e=5, moving=False, at=5.2)
+        h.send_frame(KONTOR, move_d=100, move_e=26, moving=True, at=5.4)
+        assert not h.zone(DESK).occupied  # 5.4 restarts the chain
+        # And a well-spaced fresh confirming observation fires it.
+        h.send_frame(KONTOR, move_d=100, move_e=25, moving=True, at=5.8)
+        assert h.zone(DESK).occupied
+
+    @pytest.mark.parametrize("confirm", [1, 2, 3, 5])
+    def test_rule_4_2_attack_confirm_counts_fresh_observations(self, confirm: int) -> None:
+        """attack_confirm = N fires on exactly the Nth fresh qualifying
+        observation, not the second (4.2)."""
+        config = make_config(k_move=0.0, k_still=0.0, k_bias=0.0, attack_confirm=confirm)
+        h = Harness(config, make_snapshot(config))
+        for i in range(confirm):
+            assert not h.zone(DESK).occupied, f"fired before observation {i + 1}"
+            h.send_frame(KONTOR, move_d=100, move_e=25 + (i % 2), moving=True, at=i * 0.5 + 0.5)
+        assert h.zone(DESK).occupied
+
+    def test_rule_4_2_attack_confirm_1_restores_single_observation(self) -> None:
+        config = make_config(attack_confirm=1)
+        h = Harness(config, make_snapshot(config))
+        h.send_frame(KONTOR, move_d=100, move_e=25, moving=True)
+        assert h.zone(DESK).occupied
+        assert h.zone(DESK).lam == pytest.approx(h.engine.lam_attack)
 
     def test_rule_4_2_attack_is_a_floor_never_lowers(self) -> None:
         h = Harness()
@@ -66,24 +138,31 @@ class TestRule42FastAttack:
 
 class TestRule43Hysteresis:
     def test_rule_4_3_binary_holds_between_thresholds(self) -> None:
-        h = Harness()
-        h.send_frame(KONTOR, move_d=100, move_e=20, moving=True)  # attack: 2.944
-        h.submit(quiet(KONTOR))
-        h.run(5)  # absence + decay pull lambda under theta_on
+        # z_neg_cap = 0 and a gentle bias keep the downward pull coarse
+        # enough to observe the between-thresholds hold.
+        config = make_config(z_neg_cap=0.0, k_bias=0.3)
+        h = Harness(config, make_snapshot(config))
+        h.occupy(KONTOR)  # lambda -> lam_attack: 2.944
+        h.sustain_quiet(KONTOR, 5)  # observed absence pulls under theta_on
         desk = h.zone(DESK)
         assert h.engine.lam_off < desk.lam < h.engine.lam_on
         assert desk.occupied  # holds between thresholds
-        h.run(7)
+        h.sustain_quiet(KONTOR, 7)
         assert desk.lam <= h.engine.lam_off
         assert not desk.occupied  # off at theta_off
 
 
 class TestRule44Motion:
     def test_rule_4_4_gated_z_motion_turns_motion_on(self) -> None:
+        # A live flag is not needed: within distance_hold of the last
+        # flag-on frame (2.7), the centered move score alone drives motion.
         h = Harness()
-        h.send_frame(KONTOR, move_d=100, move_e=13)  # z = 1.6 >= z_motion, flag not needed
+        h.send_frame(KONTOR, move_d=100, move_e=5, moving=True)  # flag epoch
+        h.run(6)  # motion hold expires at t=5
+        assert not h.zone(DESK).motion
+        h.send_frame(KONTOR, move_d=100, move_e=13, at=6.0)  # z = 2.06 >= z_motion
         assert h.zone(DESK).motion
-        assert not h.zone(DESK).occupied  # below z_attack, no tick yet
+        assert not h.zone(DESK).occupied  # below z_attack
 
     def test_rule_4_4_flag_with_gated_distance_turns_motion_on(self) -> None:
         h = Harness()
@@ -97,7 +176,7 @@ class TestRule44Motion:
 
     def test_rule_4_4_motion_off_after_hold(self) -> None:
         h = Harness()
-        h.send_frame(KONTOR, move_d=100, move_e=13)
+        h.send_frame(KONTOR, move_d=100, move_e=13, moving=True)
         h.submit(quiet(KONTOR))
         assert timers.motion_off(DESK) in h.deadlines
         h.run(6)  # hold expires at t=5
@@ -105,9 +184,9 @@ class TestRule44Motion:
 
     def test_rule_4_4_new_evidence_restarts_the_hold(self) -> None:
         h = Harness()
-        h.send_frame(KONTOR, move_d=100, move_e=13)
+        h.send_frame(KONTOR, move_d=100, move_e=13, moving=True)
         h.run(3)
-        h.send_frame(KONTOR, move_d=100, move_e=13)  # restart at t=3
+        h.send_frame(KONTOR, move_d=100, move_e=13, moving=True)  # restart at t=3
         h.submit(quiet(KONTOR))
         h.run(3)  # t=6: original deadline passed, restarted one has not
         assert h.zone(DESK).motion

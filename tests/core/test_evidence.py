@@ -5,67 +5,129 @@ from __future__ import annotations
 import pytest
 
 from custom_components.presence_conductor.core import timers
+from custom_components.presence_conductor.core.belief import advance
 from custom_components.presence_conductor.core.events import RecordBaseline
 from custom_components.presence_conductor.core.evidence import robust_stats
+from custom_components.presence_conductor.core.model import Coverage, StatBaseline
 
-from .harness import DESK, DOOR, KONTOR, MU, SOFAKROK, Harness, make_config, make_snapshot
+from .harness import (
+    DESK,
+    DOOR,
+    KONTOR,
+    MU,
+    SOFAKROK,
+    Z_EMPTY,
+    Harness,
+    centered_of_raw,
+    make_config,
+    make_snapshot,
+)
 
 
 class TestRule31RobustStats:
-    def test_rule_3_1_median_mad_shrugs_off_outliers(self) -> None:
-        samples = [0.08, 0.09, 0.10, 0.11, 0.12] * 3 + [0.90, 0.95]
-        mu, sigma = robust_stats(samples, sigma_min=0.001)
+    def test_rule_3_1_median_shrugs_off_outliers(self) -> None:
+        # A realistically sized window (>= stat_min_rows): the rank UCB
+        # stays inside the bulk and the two outliers never reach it.
+        samples = [0.08, 0.09, 0.10, 0.11, 0.12] * 24 + [0.90, 0.95]
+        mu, sigma = robust_stats(samples, sigma_min=0.001, quantum=0.0)
         assert mu == pytest.approx(0.10)
-        assert sigma == pytest.approx(1.4826 * 0.01)
+        assert sigma <= 1.4826 * 0.021  # bulk deviation, not an outlier
 
     def test_rule_3_1_sigma_is_floored(self) -> None:
-        mu, sigma = robust_stats([0.1] * 20, sigma_min=0.02)
+        mu, sigma = robust_stats([0.1] * 20, sigma_min=0.02, quantum=0.0)
         assert mu == pytest.approx(0.1)
-        assert sigma == 0.02  # constant samples: MAD 0, floor wins
+        assert sigma == 0.02  # constant samples: zero deviations, floor wins
+
+    def test_rule_3_1_half_quantum_guards_grid_bias(self) -> None:
+        # All deviations exactly one grid step: the half-quantum term keeps
+        # the scale from trusting the grid (3.1).
+        _mu, sigma = robust_stats([0.1, 0.11] * 30, sigma_min=0.001, quantum=0.01)
+        assert sigma == pytest.approx(1.4826 * (0.005 + 0.005))
+
+    def test_rule_3_1_ucb_covers_the_true_scale(self) -> None:
+        """The reviewer's failure mechanism: quantized-MAD point estimates
+        fitted 0.59-0.89x the true scale on ~120-row windows. The UCB +
+        half-quantum floor must cover the true scale in the overwhelming
+        majority of fits (seeded)."""
+        import random
+
+        rng = random.Random(2)
+        true_sigma = 0.05  # raw sigma 5, normalized
+        under = 0
+        for _ in range(300):
+            samples = [max(0, min(100, round(rng.gauss(20, 5)))) / 100.0 for _ in range(119)]
+            _, sigma = robust_stats(samples, sigma_min=0.02, quantum=0.01)
+            if sigma < true_sigma:
+                under += 1
+        assert under <= 6  # ~2% vs the ~50% of a point estimate
 
 
 class TestRule32EvidenceScore:
     def test_rule_3_2_z_capped_at_z_cap(self) -> None:
         h = Harness()
-        h.send_frame(KONTOR, still_d=100, still_e=100)
-        assert h.zone(DESK).z_still == pytest.approx(6.0)  # z_cap
+        h.send_frame(KONTOR, still_d=100, still_e=100, still=True)
+        assert h.zone(DESK).z_still == pytest.approx(centered_of_raw(100))  # z_cap
 
-    def test_rule_3_2_llr_weights_integrated_per_tick(self) -> None:
+    def test_rule_3_2_weights_shape_the_evidence_rate(self) -> None:
         h = Harness()
-        h.send_frame(SOFAKROK, still_d=100, still_e=35)  # z_still = 6
+        h.send_frame(SOFAKROK, still_d=100, still_e=35, still=True)  # z_still = 6
         h.tick()
-        # decay(prior) == prior, so one tick adds k_still * z_still * dt.
-        expected = h.engine.lam_prior + 0.6 * 6.0
+        # 4.1: exact constant-input update over dt = 1 with
+        # u = k_still * 6 + k_move * Z_EMPTY - k_bias.
+        t = h.config.tunables
+        u = min(
+            t.u_cap,
+            t.k_still * (centered_of_raw(35) - t.k_bias) + t.k_move * (Z_EMPTY - t.k_bias),
+        )
+        expected = advance(h.engine.lam_prior, h.engine.lam_prior, u, 1.0, 90.0)
         assert h.zone("sofakrok_zone").lam == pytest.approx(expected)
 
-    def test_rule_3_2_absence_applies_when_both_channels_at_baseline(self) -> None:
+    def test_rule_3_2_bias_applies_while_observed(self) -> None:
+        # A freshly observed channel at scores 0 (the empty mean) still
+        # integrates -k_bias: expected empty evidence is negative. With no
+        # observation at all the rate is 0 (3.8) and the belief only
+        # relaxes toward the prior.
         h = Harness()
         h.tick()
-        assert h.zone(DESK).lam == pytest.approx(h.engine.lam_prior - 0.4)
+        assert h.zone(DESK).lam == pytest.approx(h.engine.lam_prior)  # 3.8 silence
+        h.send_frame(KONTOR, move_e=10.001, still_e=10.001)  # observed, near defaults
+        h.tick()
+        assert h.zone(DESK).lam < h.engine.lam_prior  # bias flowed
 
-    def test_rule_3_2_absence_not_applied_while_evidence_present(self) -> None:
+    def test_rule_3_2_clear_still_evidence_outweighs_the_bias(self) -> None:
         h = Harness()
-        h.send_frame(SOFAKROK, still_d=100, still_e=10)  # z_still = 1
+        h.send_frame(SOFAKROK, still_d=100, still_e=20, still=True)  # z = 4.45
         h.tick()
         assert h.zone("sofakrok_zone").lam > h.engine.lam_prior
+
+    def test_rule_3_2_marginal_still_evidence_is_net_negative(self) -> None:
+        # Raw z = 1 is barely above what empty noise produces (E[max(0,Z)]
+        # = 0.4): after centering it no longer holds a zone up on its own.
+        h = Harness()
+        h.send_frame(SOFAKROK, still_d=100, still_e=10, still=True)
+        h.tick()
+        assert h.zone("sofakrok_zone").lam < h.engine.lam_prior
 
 
 class TestRule33BaselineCalibration:
     def test_rule_3_3_record_baseline_replaces_stats_robustly(self) -> None:
         h = Harness()
-        h.submit(RecordBaseline(DESK, duration=30.0))
-        assert h.deadlines[timers.baseline_end(DESK)] == pytest.approx(30.0)
-        raw = [8, 9, 10, 11, 12] * 4
+        h.submit(RecordBaseline(DESK, duration=80.0))
+        assert h.deadlines[timers.baseline_end(DESK)] == pytest.approx(80.0)
+        raw = [8, 9, 10, 11, 12] * 16
         raw[3] = 90  # a person walks through: brief violations don't poison
         raw[11] = 95
         for value in raw:
+            # 3.3: rows are sampled on the tick clock from the held values,
+            # so each 1 Hz frame is captured by the following tick.
             h.send_frame(KONTOR, move_e=value, still_e=value)
             h.step_to(h.now + 1.0)
-        h.run(15)  # window closes at t=30 during this run
+        h.run(5)  # window closed at t=80
         desk = h.zone(DESK)
         assert desk.recording is None
         assert desk.move_baseline.mu == pytest.approx(0.10, abs=0.011)
-        assert 0.02 <= desk.move_baseline.sigma <= 0.03  # MAD-derived, floored (3.1)
+        # 3.1: UCB of the deviations (0.02) + half quantum, times 1.4826.
+        assert desk.move_baseline.sigma == pytest.approx(1.4826 * 0.025, abs=0.002)
         assert desk.still_baseline.mu == pytest.approx(0.10, abs=0.011)
         assert h.persist_count == 1  # 3.3: baselines persist in the config entry
         events = h.baseline_events()
@@ -73,10 +135,12 @@ class TestRule33BaselineCalibration:
         assert events[0].zone_id == DESK
         assert events[0].move_mu == desk.move_baseline.mu
 
-    def test_rule_3_3_default_duration_is_120s(self) -> None:
+    def test_rule_3_3_default_duration_is_300s(self) -> None:
+        # 3.3: sized to the measured ~2.5 s empty cadence — 120 s yields
+        # only ~48 fresh observations, below stat_min_rows.
         h = Harness()
         h.submit(RecordBaseline(DESK))
-        assert h.deadlines[timers.baseline_end(DESK)] == pytest.approx(120.0)
+        assert h.deadlines[timers.baseline_end(DESK)] == pytest.approx(300.0)
 
     def test_rule_3_3_empty_window_keeps_old_floor(self) -> None:
         h = Harness()
@@ -85,12 +149,101 @@ class TestRule33BaselineCalibration:
         desk = h.zone(DESK)
         assert desk.move_baseline.mu == pytest.approx(MU)
         assert h.persist_count == 0
-        assert h.baseline_events() == []
+        # 3.3 observability: even a void window reports its outcome —
+        # nothing materialized, so the commit is a failure, not a success.
+        (event,) = h.baseline_events()
+        assert event.success is False
+        assert event.frame_count == 0
 
     def test_rule_3_3_unknown_zone_ignored(self) -> None:
         h = Harness()
         plan = h.submit(RecordBaseline("nope", duration=10.0))
         assert plan.timer_starts == []
+
+
+class TestRule33TransactionalCalibration:
+    """Round-5 review regressions (rule 3.3): a window computes candidate
+    + coverage before mutating anything, commits atomically, and must
+    never look successful when a required channel was not calibrated."""
+
+    @staticmethod
+    def drive(h: Harness, duration: float | None, *, seed: int = 1) -> None:
+        """The measured production shape: a fresh still observation every
+        ~2.5 s (quantized N(20, 5)), move energy quiescent (frozen value,
+        no fresh observations), one frame + one tick per second."""
+        import random
+
+        rng = random.Random(seed)
+        h.submit(RecordBaseline(DESK) if duration is None else RecordBaseline(DESK, duration))
+        zone = h.zone(DESK)
+        still_val, next_still = 20.0, 0.0
+        start = h.now
+        while zone.recording is not None:
+            fresh_still = h.now - start + 1e-9 >= next_still
+            if fresh_still:
+                still_val = float(max(0, min(100, round(rng.gauss(20, 5)))))
+                next_still += 2.5
+            h.send_frame(
+                KONTOR,
+                move_e=3.0,
+                still_e=still_val,
+                fresh_move=False,
+                fresh_still=fresh_still,
+                fresh_move_energy=False,
+            )
+            h.step_to(h.now + 1.0)
+
+    def test_short_window_at_measured_cadence_rejects_atomically(self) -> None:
+        """The round-5 blocker: 120 s at the 2.5 s cadence yields ~48 fresh
+        still observations — the still path is rejected, and the rejection
+        must preserve the *entire* previous calibration, persist nothing
+        and report failure (not silently clear stat_cal and claim success)."""
+        h = Harness()
+        zone = h.zone(DESK)
+        good = {
+            "move_agg": StatBaseline(0.4, 0.6, 0.0, 1.2),
+            "still_agg": StatBaseline(0.4, 0.6, 0.0, 1.4),
+        }
+        zone.stat_cal = dict(good)
+        self.drive(h, 120.0)
+        assert zone.recording is None
+        (event,) = h.baseline_events()
+        assert event.success is False
+        cov = event.coverage
+        assert cov["still_agg"].status is Coverage.REJECTED
+        assert cov["still_agg"].fresh < 60  # ~48 at the measured cadence
+        assert "need 60" in cov["still_agg"].reason
+        # Partial coverage is reported honestly: the quiescent move channel
+        # would have been accepted, the gate paths never reported.
+        assert cov["move_agg"].status is Coverage.QUIESCENT
+        assert cov["move_gate"].status is Coverage.NO_DATA
+        # Atomic: nothing half-applied, nothing lost, nothing persisted.
+        assert zone.move_baseline.mu == pytest.approx(MU)
+        assert zone.still_baseline.mu == pytest.approx(MU)
+        assert zone.stat_cal == good
+        assert h.persist_count == 0
+
+    def test_default_window_at_measured_cadence_commits(self) -> None:
+        """The 300 s default yields ~120 fresh still observations: the
+        window commits, the quiescent move channel is reported as such,
+        and only the committed window persists."""
+        h = Harness()
+        zone = h.zone(DESK)
+        self.drive(h, None)  # the default baseline_duration
+        (event,) = h.baseline_events()
+        assert event.success is True
+        cov = event.coverage
+        assert cov["still_agg"].status is Coverage.CALIBRATED
+        assert cov["still_agg"].fresh >= 60
+        assert cov["move_agg"].status is Coverage.QUIESCENT  # reported as such
+        assert cov["move_gate"].status is Coverage.NO_DATA
+        assert zone.still_baseline.mu == pytest.approx(0.20, abs=0.02)
+        assert zone.still_baseline.sigma >= 0.05  # 3.1: UCB covers the truth
+        assert zone.move_baseline.mu == pytest.approx(0.03)
+        assert zone.move_baseline.sigma == pytest.approx(0.02)  # sigma_min
+        assert "still_agg" in zone.stat_cal  # empirical statistic (3.7)
+        assert "move_agg" not in zone.stat_cal  # quiescent: analytic fallback
+        assert h.persist_count == 1
 
 
 class TestRule34BackgroundAdaptation:

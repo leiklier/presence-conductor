@@ -6,7 +6,7 @@ import pytest
 
 from custom_components.presence_conductor.core.model import Activity
 
-from .harness import SOFA, SOFAKROK, Harness
+from .harness import SOFA, SOFAKROK, Harness, make_config, make_snapshot, quiet
 
 STRONG_MOVE = {"move_d": 100.0, "move_e": 35.0, "moving": True}
 STRONG_STILL = {"still_d": 100.0, "still_e": 35.0, "still": True, "move_e": 5.0}
@@ -55,6 +55,36 @@ class TestRule51States:
         assert h.zone(SOFA).activity is Activity.ACTIVE
 
 
+class TestRule51DominanceContinuity:
+    def test_rule_5_1_single_still_impulse_never_matures(self) -> None:
+        """A single still-dominant frame followed by quiet evidence must not
+        promote to SETTLED t_settle later: dominance is continuous, and
+        quiet/equal evidence resets both clocks (5.1). A short t_settle
+        keeps the window inside the span occupancy survives quiet evidence."""
+        config = make_config(t_settle=2.0)
+        h = Harness(config, make_snapshot(config))
+        h.occupy(SOFAKROK)
+        h.send_frame(SOFAKROK, **STRONG_STILL)  # one still-dominant frame
+        h.tick()  # dominance clocks advance with time (4.1)
+        assert h.zone(SOFA).still_dominant_since is not None
+        h.submit(quiet(SOFAKROK))  # the impulse is over
+        h.tick()
+        h.tick()  # now > impulse + t_settle
+        zone = h.zone(SOFA)
+        assert zone.occupied  # hysteresis still holds the binary
+        assert zone.still_dominant_since is None  # 5.1: clock reset
+        assert zone.activity is not Activity.SETTLED
+
+    def test_rule_5_1_continuous_still_dominance_settles(self) -> None:
+        """The contrast: the same window with the still channel genuinely
+        dominant throughout does settle."""
+        config = make_config(t_settle=2.0)
+        h = Harness(config, make_snapshot(config))
+        h.occupy(SOFAKROK)
+        h.sustain(SOFAKROK, 4, **STRONG_STILL)
+        assert h.zone(SOFA).activity is Activity.SETTLED
+
+
 class TestRule52PassBy:
     def test_rule_5_2_walkthrough_emits_pass_by_on_exit(self) -> None:
         h = Harness()
@@ -66,8 +96,8 @@ class TestRule52PassBy:
         events = h.pass_bys()
         assert len(events) == 1
         assert events[0].zone_id == SOFA
-        assert events[0].peak_probability == pytest.approx(0.999, abs=0.002)
-        assert 10 < events[0].duration < 45  # on -> off traversal time
+        assert events[0].peak_confidence == pytest.approx(0.999, abs=0.002)
+        assert 5 <= events[0].duration < 45  # on -> off traversal time
 
     def test_rule_5_2_no_pass_by_after_dwelling(self) -> None:
         h = Harness()

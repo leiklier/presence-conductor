@@ -3,18 +3,24 @@
 The default fixture mirrors the live apartment (docs/DECISION.md): three
 MSR-2 sensors, where kontor carries two zones (desk + door) and the stue
 room fuses two single-zone sensors (sofakrok + spisebord). All zones share
-a calibrated noise floor of ``mu = 0.05, sigma = 0.05`` (normalized units),
-so raw energies map to z-scores as ``z = (raw/100 - 0.05) / 0.05``:
+a calibrated noise floor of ``mu = 0.05, sigma = 0.05`` (normalized units)
+and no statistic calibration, so the analytic fallback applies (rule 3.7,
+``m0 = 0.3989, s0 = 0.5838`` for m = 1): raw energies map to raw scores as
+``S = max(0, (raw/100 - 0.05) / 0.05)`` and to centered scores (rule 3.2)
+as ``z = clamp((S - 0.3989) / 0.5838, -1, 6)``:
 
-====  ===  =========================================
-raw     z  meaning with default tunables
-====  ===  =========================================
-   5  0.0  at baseline (absence applies, rule 3.2)
-  10  1.0  weak evidence
-12.5  1.5  motion trigger (z_motion, rule 4.4)
-  20  3.0  fast-attack trigger (z_attack, rule 4.2)
-  35  6.0  saturated (z_cap, rule 3.2)
-====  ===  =========================================
+====  =====  =========================================
+raw       z  meaning with default tunables
+====  =====  =========================================
+   5  -0.68  at baseline: absence evidence (rule 3.2)
+  10   1.03  weak evidence
+  13   2.06  motion trigger (z_motion = 2.0, rule 4.4)
+  25   6.0   saturated (z_cap); attack candidate (4.2)
+  35   6.0   saturated
+====  =====  =========================================
+
+The centered score of a baseline frame is Z_EMPTY = -0.683; the evidence
+rate of a fully quiet zone is ``(k_move + k_still) * Z_EMPTY - k_bias``.
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ from custom_components.presence_conductor.core.model import (
     ZoneState,
 )
 from custom_components.presence_conductor.core.plan import BaselineRecorded, PassBy, Plan
+from custom_components.presence_conductor.core.stats import clipped_mean, onesided_max_stats
 
 KONTOR = "kontor"
 SOFAKROK = "sofakrok"
@@ -47,6 +54,30 @@ BORD = "spisebord_zone"
 #: Calibrated noise floor used by the default snapshot (normalized units).
 MU = 0.05
 SIGMA = 0.05
+
+#: Analytic fallback statistic (rule 3.7) for m = 1, used by every zone of
+#: the default snapshot (no empirical statistic calibration).
+STAT_M0 = 0.39894228040139595
+STAT_S0 = 0.5838193701035719
+
+
+def centered_of(raw_s: float, m: int = 1) -> float:
+    """Centered score (rule 3.2) of a raw statistic ``S`` under the analytic
+    fallback for ``m`` owned gates (rule 3.7) and default caps, including
+    the clipped-mean recentering (c0, rule 3.2)."""
+    m0, s0 = onesided_max_stats(m)
+    return min(6.0, max(-1.0, (raw_s - m0) / s0)) - clipped_mean(m, 1.0, 6.0)
+
+
+def centered_of_raw(raw_energy: float, *, mu: float = MU, sigma: float = SIGMA) -> float:
+    """The centered score (rule 3.2) a gated frame with this raw 0-100
+    energy produces under the default snapshot's floors."""
+    return centered_of(max(0.0, (raw_energy / 100.0 - mu) / sigma), 1)
+
+
+#: Centered score of a channel sitting exactly at the noise floor (S = 0).
+Z_EMPTY = centered_of(0.0, 1)
+
 
 DEFAULT_ZONES = (
     ZoneConfig(DESK, "Desk", KONTOR, room_id="kontor", near_cm=30, far_cm=150, fallback=True),
@@ -126,6 +157,9 @@ def frame(
     still: bool = False,
     gate_move: tuple[float | None, ...] | None = None,
     gate_still: tuple[float | None, ...] | None = None,
+    move_obs: int = 0,
+    still_obs: int = 0,
+    move_energy_obs: int = 0,
 ) -> SensorFrame:
     """A coalesced frame (rule 1.1). Energies are raw 0-100."""
     return SensorFrame(
@@ -139,6 +173,9 @@ def frame(
         has_still_target=still,
         gate_move=gate_move,
         gate_still=gate_still,
+        move_obs=move_obs,
+        still_obs=still_obs,
+        move_energy_obs=move_energy_obs,
     )
 
 
@@ -168,6 +205,8 @@ class Harness:
         self.emitted: list[tuple[float, object]] = []
         #: plans that asked for calibration persistence.
         self.persist_count = 0
+        #: Per-sensor observation counters (rule 1.1) for send_frame.
+        self.obs_counters: dict[str, list[int]] = {}
         if auto_start:
             self._absorb(self.engine.start(now))
 
@@ -191,12 +230,50 @@ class Harness:
         self._absorb(plan)
         return plan
 
-    def send_frame(self, sensor_id: str, *, at: float | None = None, **frame_kw) -> Plan:
-        return self.submit(frame(sensor_id, **frame_kw), at=at)
+    def send_frame(
+        self,
+        sensor_id: str,
+        *,
+        at: float | None = None,
+        fresh: bool = True,
+        fresh_move: bool | None = None,
+        fresh_still: bool | None = None,
+        fresh_move_energy: bool | None = None,
+        **frame_kw,
+    ) -> Plan:
+        """Submit a coalesced frame. ``fresh`` (default) advances the
+        sensor's observation counters (rule 1.1): each explicit test frame
+        is a new measurement; pass ``fresh=False`` to re-present the cached
+        values, as an unrelated entity change would. The per-channel
+        overrides model partial updates (e.g. a still-only heartbeat)."""
+        counters = self.obs_counters.setdefault(sensor_id, [0, 0, 0])
+        if fresh_move if fresh_move is not None else fresh:
+            counters[0] += 1
+        if fresh_still if fresh_still is not None else fresh:
+            counters[1] += 1
+        if fresh_move_energy if fresh_move_energy is not None else fresh:
+            counters[2] += 1
+        return self.submit(
+            frame(
+                sensor_id,
+                move_obs=counters[0],
+                still_obs=counters[1],
+                move_energy_obs=counters[2],
+                **frame_kw,
+            ),
+            at=at,
+        )
 
     def occupy(self, sensor_id: str, distance: float = 100.0, *, at: float | None = None) -> Plan:
-        """Strong gated move evidence: the fast attack (4.2) flips occupied."""
-        return self.send_frame(sensor_id, move_d=distance, move_e=35.0, moving=True, at=at)
+        """Strong gated move evidence: the confirmed fast attack (4.2)
+        flips occupied — two qualifying frames ``attack_gap_min`` apart."""
+        gap = self.config.tunables.attack_gap_min
+        self.send_frame(sensor_id, move_d=distance, move_e=35.0, moving=True, at=at)
+        # 4.2: the energy changes between the frames — a fresh observation,
+        # as ESPHome dedup guarantees for real measurements.
+        return self.send_frame(
+            sensor_id, move_d=distance, move_e=36.0, moving=True, at=self.now + gap
+        )
 
     def tick(self, at: float | None = None) -> Plan:
         return self.submit(Tick(), at=self.now + 1.0 if at is None else at)
@@ -225,9 +302,9 @@ class Harness:
             self.step_to(self.now + 1.0)
 
     def sustain_quiet(self, sensor_id: str, seconds: float) -> None:
-        """Baseline frames (z = 0): absence evidence per rule 3.2."""
+        """Fresh baseline observations (S = 0): absence evidence (3.2)."""
         for _ in range(round(seconds)):
-            self.submit(quiet(sensor_id))
+            self.send_frame(sensor_id, move_e=100 * MU, still_e=100 * MU)
             self.step_to(self.now + 1.0)
 
     def step_to(self, target: float) -> None:
@@ -270,7 +347,7 @@ class Harness:
             for zone_id, z in s.zones.items()
         )
         rooms = tuple(
-            (room_id, r.occupied, r.motion, r.probability, str(r.activity), r.settled)
+            (room_id, r.occupied, r.motion, r.confidence, str(r.activity), r.settled)
             for room_id, r in s.rooms.items()
         )
         return (
@@ -278,7 +355,7 @@ class Harness:
             rooms,
             s.lam_home,
             s.anyone_home,
-            s.home_probability,
+            s.home_confidence,
             tuple(self.emitted),
             self.persist_count,
         )

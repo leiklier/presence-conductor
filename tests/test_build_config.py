@@ -18,6 +18,7 @@ from custom_components.presence_conductor.core.model import (
     GateBaselines,
     RoomConfig,
     SensorConfig,
+    StatBaseline,
     Tunables,
     ZoneBaselines,
     ZoneConfig,
@@ -133,8 +134,8 @@ def test_tunables_partial_merge_and_unknown_keys() -> None:
     assert tunables.tau_decay == 120.0
     assert tunables.theta_off == Tunables().theta_off  # untouched default
 
-    config = build_config({**_options(), "tunables": {"z_attack": 2.5}})
-    assert config.tunables.z_attack == 2.5
+    config = build_config({**_options(), "tunables": {"attack_tail_ppm": 50.0}})
+    assert config.tunables.attack_tail_ppm == 50.0
     assert config.tunables.k_move == Tunables().k_move
 
 
@@ -193,3 +194,19 @@ def test_baselines_gates_round_trip() -> None:
         3: GateBaselines(move_mu=0.05, move_sigma=0.05, still_mu=0.05, still_sigma=0.05),
     }
     assert baselines["kontor"].gates == {}  # backward compatible (3.6)
+
+
+def test_baselines_stats_round_trip() -> None:
+    """Rule 3.7: the optional "stats" mapping becomes StatBaseline records;
+    pre-3.7 baselines load without it and fall back to the analytic values."""
+    options = _options()
+    options["baselines"]["sofakrok"]["stats"] = {
+        "move_agg": {"mu": 0.41, "sigma": 0.55},
+        "still_gate": {"mu": 0.9, "sigma": 0.62},
+    }
+    baselines = baselines_from_options(options)
+    assert baselines["sofakrok"].stats == {
+        "move_agg": StatBaseline(mu=0.41, sigma=0.55),
+        "still_gate": StatBaseline(mu=0.9, sigma=0.62),
+    }
+    assert baselines["kontor"].stats == {}  # backward compatible (3.7)

@@ -1,28 +1,44 @@
 """Evidence model and calibration (spec rule 3).
 
 Per zone and per channel (move, still) a robust noise floor ``(mu, sigma)``
-turns raw energies into capped z-scores (3.1, 3.2). Baselines come from
-explicit RecordBaseline windows (3.3) and drift slowly with the background
-while the zone is confidently empty (3.4).
+(3.1) turns raw energies into a one-sided raw statistic ``S`` — the max
+over owned gates (2.5) on the gate path, the gated aggregate deviation on
+the fallback path. ``S`` is biased by construction (``E[S] > 0`` under
+symmetric empty noise, growing with the owned-gate count), so it enters
+the filter only as the centered score ``(S - m0) / s0`` against its own
+empty-room distribution (3.2, 3.7): empirical when calibrated, analytic
+Gaussian (:mod:`.stats`) otherwise. The per-second evidence rate subtracts
+``k_bias`` unconditionally, making the expected rate in a calibrated empty
+room strictly negative — noise must never drift a zone occupied (§3).
 
-When a frame carries per-gate energies, each owned gate (2.4) is scored
-against its own floor (3.6) and the zone's channel evidence is the max over
-its owned gates (2.5), replacing the aggregate energy + distance path for
-that frame (2.6). Calibration and adaptation extend per-gate under the same
-windows and freeze conditions (3.6).
+Baselines come from RecordBaseline windows sampled on the tick clock
+(3.3) and drift slowly with the background while the zone is confidently
+empty (3.4).
 """
 
 from __future__ import annotations
 
 import math
-from statistics import median
+from itertools import pairwise
+from statistics import fmean, median, pstdev
 from typing import TYPE_CHECKING
 
-from . import gating
+from . import gating, stats
 from .events import RecordBaseline, SensorFrame
-from .model import BaselineRecording, ChannelStats, Health, Tunables, ZoneState
+from .model import (
+    Activity,
+    BaselineRecording,
+    BaselineRow,
+    ChannelCoverage,
+    ChannelStats,
+    Coverage,
+    Health,
+    StatBaseline,
+    Tunables,
+    ZoneState,
+)
 from .plan import BaselineRecorded
-from .timers import baseline_end
+from .timers import baseline_end, motion_off
 
 if TYPE_CHECKING:
     from .engine import ConductorEngine
@@ -33,27 +49,64 @@ if TYPE_CHECKING:
 MAD_TO_SIGMA = 1.4826
 #: Consistency factor for the EMA of absolute deviations (rule 3.4).
 ABS_DEV_TO_SIGMA = 1.2533
+#: One-sided 95% normal quantile for the scale UCB (rule 3.1).
+_UCB_Z = 1.645
+
+#: Statistic-calibration keys (rules 3.2, 3.7): channel + evidence path.
+STAT_KEYS = ("move_agg", "move_gate", "still_agg", "still_gate")
 
 
-def robust_stats(samples: list[float], sigma_min: float) -> tuple[float, float]:
-    """Median / MAD over a calibration window, sigma floored (rule 3.1)."""
+def robust_stats(
+    samples: list[float], sigma_min: float, quantum: float, ucb_z: float = _UCB_Z
+) -> tuple[float, float]:
+    """Conservative out-of-sample noise floor over a window (rule 3.1).
+
+    ``mu`` is the median. ``sigma`` deliberately over-covers: an
+    underestimated scale inflates every future score (and voids the 4.2
+    tail guarantee), so instead of the MAD point estimate it uses the
+    one-sided upper confidence bound for the median absolute deviation —
+    the k-th order statistic of the deviations with
+    ``k = ceil(n/2 + ucb_z * n / (2 * sqrt(n_eff)))`` — plus half a
+    quantization step (integer-reported energies put deviations on a
+    grid; a MAD that quantizes one step low understates the scale by
+    25-40%). ``ucb_z`` is the per-fit quantile: 1.645 for a single floor,
+    Bonferroni-adjusted (:func:`.stats.family_ucb_z`) when the fit is one
+    of a family feeding a max statistic (3.1) — a per-fit 95% bound is
+    not simultaneous over nine gates. The bound is a conservative
+    engineering approximation under dependence (validated empirically in
+    the seeded null sweeps), not a demonstrated confidence bound.
+    """
     mu = median(samples)
-    mad = median([abs(s - mu) for s in samples])
-    return mu, max(sigma_min, MAD_TO_SIGMA * mad)
+    deviations = sorted(abs(s - mu) for s in samples)
+    n = len(deviations)
+    # Dependence discount (3.1/3.7): the rank bound counts Bernoulli
+    # trials, and autocorrelated samples carry fewer effective trials —
+    # n_eff = n(1-rho)/(1+rho) with rho at its own upper bound. The
+    # binomial sd then inflates from sqrt(n)/2 to n/(2*sqrt(n_eff)).
+    # rho comes from the lag-1 sign agreement around the median (the rank
+    # trials ARE those signs), which outliers cannot poison.
+    signs = [1 if sample > mu else -1 for sample in samples if sample != mu]
+    agree = sum(a == b for a, b in pairwise(signs)) / (len(signs) - 1) if len(signs) > 1 else 0.0
+    rho = max(0.0, 2.0 * agree - 1.0)
+    rho = min(0.999, rho + _UCB_Z * math.sqrt(max(0.0, 1.0 - rho * rho) / n))
+    n_eff = max(2.0, n * (1.0 - rho) / (1.0 + rho))
+    k = min(n, math.ceil(n / 2 + ucb_z * n / (2.0 * math.sqrt(n_eff))))  # 1-based rank
+    mad_ucb = deviations[k - 1]
+    return mu, max(sigma_min, MAD_TO_SIGMA * (mad_ucb + quantum / 2.0))
 
 
-def z_score(energy: float, stats: ChannelStats, t: Tunables) -> float:
-    """``z = max(0, (energy - mu) / sigma)``, capped at ``z_cap`` (rule 3.2)."""
-    return min(t.z_cap, max(0.0, (energy - stats.mu) / stats.sigma))
+def onesided_z(energy: float, floor: ChannelStats) -> float:
+    """Raw one-sided deviation from a noise floor (rules 2.5, 3.2)."""
+    return max(0.0, (energy - floor.mu) / floor.sigma)
 
 
-def gate_channel_z(
+def gate_statistic(
     values: tuple[float | None, ...] | None,
     owned: tuple[int, ...],
     floors: dict[int, ChannelStats],
     t: Tunables,
 ) -> float | None:
-    """Zone gate evidence for one channel (rules 2.5, 3.6).
+    """Raw gate-path statistic for one channel (rules 2.5, 3.6).
 
     ``None`` means the frame's gate data does not cover this zone's channel
     — no gate tuple, no owned gates (2.4), or every owned gate unknown —
@@ -63,7 +116,7 @@ def gate_channel_z(
         return None
     default = ChannelStats(t.default_mu, t.default_sigma)  # 3.6: uncalibrated
     scores = [
-        z_score(value, floors.get(index, default), t)  # 3.6: the gate's own floor
+        onesided_z(value, floors.get(index, default))  # 3.6: the gate's own floor
         for index in owned
         if index < len(values) and (value := values[index]) is not None
     ]
@@ -71,23 +124,68 @@ def gate_channel_z(
         return None
     # 2.5: max over owned gates, not the sum — a person occupies one or two
     # gates, and summing would dilute a strong local return with the noise
-    # of empty gates. The max also credits two simultaneous people in
-    # different zones of one sensor, impossible in the single-distance
-    # model (2.1).
+    # of empty gates. The max is a multiple-comparison statistic; 3.7's
+    # centering is what keeps it honest.
     return max(scores)
 
 
-def llr(zst: ZoneState, t: Tunables) -> float:
-    """Per-frame log-likelihood ratio, per second (rule 3.2).
+def centered(raw: float, cal: StatBaseline | None, m: int, t: Tunables) -> float:
+    """Center a raw statistic against its empty-room distribution (3.2).
 
-    ``k_absence`` applies only when both channels are un-gated or at
-    baseline (their z-scores are zero either way — :func:`ingest_frame`
-    zeroes un-gated channels).
+    ``cal`` is the empirical statistic calibration (3.7); ``None`` falls
+    back to the analytic distribution of a max over ``m`` gates (or ``m=1``
+    for the aggregate path). Clamped to ``[-z_neg_cap, z_cap]``, then the
+    clamped score's own empty-room mean (``c0``) is subtracted — the
+    asymmetric clamp alone would leave a positive residual mean (3.2).
     """
-    positive = t.k_move * zst.z_move + t.k_still * zst.z_still  # 3.2
-    if positive > 0.0:
-        return positive
-    return -t.k_absence  # 3.2
+    if cal is None:
+        m0, s0 = stats.onesided_max_stats(m)  # 3.7 analytic fallback
+        c0 = stats.clipped_mean(m, t.z_neg_cap, t.z_cap)
+        tau = 1.0  # 3.7: independence assumed when uncalibrated
+    else:
+        m0, s0, c0, tau = cal.mu, cal.sigma, cal.clip_mu, cal.tau
+    score = (raw - m0) / max(s0, t.stat_sigma_min)
+    # 3.2: correlated observations carry proportionally less independent
+    # information per second (tau from 3.7).
+    return (min(t.z_cap, max(-t.z_neg_cap, score)) - c0) / max(1.0, tau)
+
+
+def _channel_term(z: float, k: float, age: float | None, t: Tunables) -> float:
+    """One channel's contribution to the evidence rate (rules 3.2, 3.8).
+
+    The absence margin (``k_bias``) is subtracted from every observed
+    score first — E[z] = 0 on calibrated empty noise (3.2/3.7), so the
+    margin makes the expected observed rate exactly ``-(k_move + k_still)
+    * k_bias`` for any gate count. A positive shifted score is live for
+    ``obs_budget`` after its observation — a held value is one
+    measurement, not one per second; a non-positive one is live for
+    ``obs_hold``. Past its window the channel is silent.
+    """
+    if age is None:
+        return 0.0  # never observed
+    shifted = z - t.k_bias  # 3.2: the absence margin
+    if shifted > 0.0:
+        return k * shifted if age <= t.obs_budget else 0.0
+    return k * shifted if age <= t.obs_hold else 0.0
+
+
+def evidence_rate(
+    zst: ZoneState, t: Tunables, move_age: float | None, still_age: float | None
+) -> float:
+    """Per-second evidence rate (rule 3.2) at the given observation ages.
+
+    ``k_bias`` is subtracted whenever at least one channel is
+    observationally live (3.8) — with both channels silent the rate is 0
+    and the belief simply relaxes toward the prior (4.1). ``u_cap`` bounds
+    the upward rate: centering fixes the empty process's mean, not its
+    tails, and a one-sample spike must not out-accumulate a genuine entry
+    (spikes are 4.2's job). This is a calibrated anomaly score, not a
+    log-likelihood ratio (8.7).
+    """
+    rate = _channel_term(zst.z_move, t.k_move, move_age, t) + _channel_term(
+        zst.z_still, t.k_still, still_age, t
+    )
+    return min(t.u_cap, rate)  # 3.2
 
 
 #: Normalized frame energies: aggregates plus optional per-gate tuples.
@@ -99,70 +197,121 @@ type _Energies = tuple[
 ]
 
 
-def ingest_frame(engine: ConductorEngine, frame: SensorFrame) -> _Energies:
-    """Normalize (1.4), gate (2.1-2.6) and score (3.2) one frame.
+def ingest_frame(engine: ConductorEngine, frame: SensorFrame, now: float | None) -> _Energies:
+    """Normalize (1.4), gate (2.1-2.7) and score (3.2) one frame.
 
-    Stores the resulting evidence on every zone of the frame's sensor and
-    returns the normalized energies.
+    Stores the resulting centered evidence on every zone of the frame's
+    sensor and returns the normalized energies. ``now = None`` is the seed
+    path (7.1): flag recency is unknown, so only flag-on distances gate.
     """
     t = engine.config.tunables
+    sensor = engine.state.sensors.get(frame.sensor_id)
     move_e = gating.normalize_energy(frame.move_energy)  # 1.4
     still_e = gating.normalize_energy(frame.still_energy)  # 1.4
     gate_move = gating.normalize_gates(frame.gate_move)  # 1.4
     gate_still = gating.normalize_gates(frame.gate_still)  # 1.4
-    gates = gating.gate_frame(engine.config, frame)  # 2.1-2.3
+    gates = gating.gate_frame(engine.config, frame, sensor, now)  # 2.1-2.3, 2.7
     for zone in engine.config.zones_for_sensor(frame.sensor_id):
         zst = engine.state.zones[zone.zone_id]
+        if zst.recording is not None:
+            # 3.3: the estimator is suspended while calibrating — frames
+            # feed the calibration rows only; the published state stays
+            # the asserted "empty" (on_record_baseline pinned it).
+            continue
         owned = engine.owned_gates[zone.zone_id]  # 2.4
         move_gated, still_gated = gates[zone.zone_id]
-        z_gate_move = gate_channel_z(gate_move, owned, zst.gate_move_baselines, t)  # 2.5
-        z_gate_still = gate_channel_z(gate_still, owned, zst.gate_still_baselines, t)  # 2.5
-        if z_gate_move is not None:
+        if t.use_gate_evidence:
+            raw_move = gate_statistic(gate_move, owned, zst.gate_move_baselines, t)  # 2.5
+            raw_still = gate_statistic(gate_still, owned, zst.gate_still_baselines, t)  # 2.5
+        else:
+            # 2.6: gate evidence is experimental until real gate-path
+            # timing is captured; calibration still records gate rows.
+            raw_move = raw_still = None
+        gate_tau, agg_tau = engine.attack_thresholds[zone.zone_id]  # 4.2
+        if raw_move is not None:
             # 2.6: gate evidence replaces the aggregate path for this frame;
             # the channel counts as gated iff its own gates are elevated
             # (spatial attribution — 4.2 and 7.1 key on the flag).
-            zst.z_move = z_gate_move
-            zst.move_gated = z_gate_move > 0.0
+            zst.move_gated = raw_move > 0.0
             zst.move_from_gates = True
+            zst.z_move = centered(raw_move, zst.stat_cal.get("move_gate"), len(owned), t)
+            # 4.2: candidacy is a tail event on the RAW statistic against
+            # the analytic threshold for this path's gate count.
+            zst.attack_candidate = raw_move >= gate_tau
         else:
             # 2.6: automatic per-frame fallback to the aggregate path.
             zst.move_gated = move_gated
             zst.move_from_gates = False
-            # Rule 3.5 (rationale): the gated z keeps crediting sub-threshold
-            # energy margins as evidence even when the radar's own binary
-            # verdict has dropped the target.
-            zst.z_move = (
-                z_score(move_e, zst.move_baseline, t) if move_gated and move_e is not None else 0.0
+            # Rule 3.5 (rationale): while the frozen distance stays usable
+            # (2.7), sub-threshold energy margins keep counting as evidence
+            # even when the radar's own binary verdict has dropped the
+            # target. An un-gated channel scores S = 0, which centers to a
+            # negative score — absence evidence, continuously (3.2).
+            raw = (
+                onesided_z(move_e, zst.move_baseline) if move_gated and move_e is not None else 0.0
             )
-        if z_gate_still is not None:
-            zst.z_still = z_gate_still  # 2.6
-            zst.still_gated = z_gate_still > 0.0
+            zst.z_move = centered(raw, zst.stat_cal.get("move_agg"), 1, t)
+            zst.attack_candidate = raw >= agg_tau  # 4.2 (raw = 0 if un-gated)
+        if raw_still is not None:
+            zst.still_gated = raw_still > 0.0  # 2.6
             zst.still_from_gates = True
+            zst.z_still = centered(raw_still, zst.stat_cal.get("still_gate"), len(owned), t)
         else:
             zst.still_gated = still_gated  # 2.6 fallback
             zst.still_from_gates = False
-            zst.z_still = (
-                z_score(still_e, zst.still_baseline, t)
+            raw = (
+                onesided_z(still_e, zst.still_baseline)
                 if still_gated and still_e is not None
                 else 0.0
             )
+            zst.z_still = centered(raw, zst.stat_cal.get("still_agg"), 1, t)
     return move_e, still_e, gate_move, gate_still
 
 
 def apply_frame(engine: ConductorEngine, frame: SensorFrame, now: float) -> None:
-    """Frame-side evidence work: ingest, baseline collection, adaptation."""
-    energies = ingest_frame(engine, frame)
-    _collect_baseline(engine, frame.sensor_id, energies)  # 3.3, 3.6
+    """Frame-side evidence work: freshness, ingest, sensor caches,
+    adaptation."""
+    sensor = engine.state.sensors[frame.sensor_id]
+    # 1.1 observation clock: a counter advance is a new measurement; the
+    # values alone cannot say (the adapter re-emits its cached frame on
+    # any entity change, and a forced same-value re-publication IS a new
+    # measurement).
+    if frame.move_obs != sensor.move_obs:
+        sensor.move_obs = frame.move_obs
+        sensor.move_obs_at = now
+    if frame.still_obs != sensor.still_obs:
+        sensor.still_obs = frame.still_obs
+        sensor.still_obs_at = now
+    sensor.move_energy_fresh = frame.move_energy_obs != sensor.move_energy_obs  # 4.2
+    sensor.move_energy_obs = frame.move_energy_obs
+    energies = ingest_frame(engine, frame, now)
+    move_e, still_e, gate_move, gate_still = energies
+    # Caches feed the tick-aligned calibration rows (3.3); a None field
+    # (never reported) keeps its previous value like the adapter's view.
+    if move_e is not None:
+        sensor.last_move_e = move_e
+    if still_e is not None:
+        sensor.last_still_e = still_e
+    if gate_move is not None:
+        sensor.last_gate_move = gate_move
+    if gate_still is not None:
+        sensor.last_gate_still = gate_still
+    # 2.7: flag recency, after gating — the hold measures from when the
+    # flag was last on, and a flag-on frame gates through the flag itself.
+    if frame.has_moving_target:
+        sensor.move_flag_at = now
+    if frame.has_still_target:
+        sensor.still_flag_at = now
     _adapt_background(engine, frame.sensor_id, energies, now)  # 3.4, 3.6
 
 
 def update_background_clock(engine: ConductorEngine, zst: ZoneState, now: float) -> None:
-    """Track how long the posterior has stayed below ``p_background`` (3.4).
+    """Track how long the confidence has stayed below ``p_background`` (3.4).
 
-    Called after every posterior change. Adaptation freezes the moment the
-    posterior rises: both the eligibility clock and the EMA anchor reset.
+    Called after every belief change. Adaptation freezes the moment the
+    confidence rises: both the eligibility clock and the EMA anchor reset.
     """
-    if zst.probability < engine.config.tunables.p_background:
+    if zst.confidence < engine.config.tunables.p_background:
         if zst.below_since is None:
             zst.below_since = now
     else:  # 3.4: freeze immediately
@@ -170,11 +319,16 @@ def update_background_clock(engine: ConductorEngine, zst: ZoneState, now: float)
         zst.last_adapt_at = None
 
 
-def _ema_update(stats: ChannelStats, energy: float, alpha: float, t: Tunables) -> None:
-    """One 3.4 EMA step of a noise floor toward an observed energy."""
-    stats.mu += alpha * (energy - stats.mu)
-    deviation = ABS_DEV_TO_SIGMA * abs(energy - stats.mu)
-    stats.sigma = max(t.sigma_min, stats.sigma + alpha * (deviation - stats.sigma))  # 3.1
+def _ema_update(stats_: ChannelStats, energy: float, alpha: float, t: Tunables) -> None:
+    """One 3.4 EMA step of a noise floor toward an observed energy.
+
+    The deviation target carries the same half-quantum guard as 3.1: the
+    EMA's sampling error is negligible at its time constant, the
+    quantization bias is not.
+    """
+    stats_.mu += alpha * (energy - stats_.mu)
+    deviation = ABS_DEV_TO_SIGMA * (abs(energy - stats_.mu) + t.energy_quantum / 2.0)
+    stats_.sigma = max(t.sigma_min, stats_.sigma + alpha * (deviation - stats_.sigma))  # 3.1
 
 
 def _adapt_background(
@@ -184,14 +338,15 @@ def _adapt_background(
     now: float,
 ) -> None:
     """Slow EMA of the noise floors while the zone is confidently empty
-    (3.4), aggregate and per-gate alike (3.6)."""
+    (3.4), aggregate and per-gate alike (3.6). Floors only: the statistic
+    calibration (3.7) refreshes on RecordBaseline."""
     t = engine.config.tunables
     move_e, still_e, gate_move, gate_still = energies
     zones = engine.config.zones_for_sensor(sensor_id)
     # Energies are per sensor, not per zone: while ANY zone of this sensor is
     # elevated, its energies are plausibly a person, so no sibling zone may
     # learn them as background (3.4: "without learning a person as noise").
-    if any(engine.state.zones[z.zone_id].probability >= t.p_background for z in zones):
+    if any(engine.state.zones[z.zone_id].confidence >= t.p_background for z in zones):
         return
     for zone in zones:
         zst = engine.state.zones[zone.zone_id]
@@ -207,9 +362,9 @@ def _adapt_background(
         if dt <= 0.0:
             continue
         alpha = 1.0 - math.exp(-dt / t.tau_background)  # 3.4: tau_background
-        for energy, stats in ((move_e, zst.move_baseline), (still_e, zst.still_baseline)):
+        for energy, floor in ((move_e, zst.move_baseline), (still_e, zst.still_baseline)):
             if energy is not None:
-                _ema_update(stats, energy, alpha, t)
+                _ema_update(floor, energy, alpha, t)
         # 3.6: per-gate floors follow the same clock, eligibility and freeze
         # conditions; a gate without a floor starts from the defaults.
         for values, floors in (
@@ -221,53 +376,163 @@ def _adapt_background(
             for index in engine.owned_gates[zone.zone_id]:  # 2.4
                 if index >= len(values) or (energy := values[index]) is None:
                     continue
-                stats = floors.setdefault(index, ChannelStats(t.default_mu, t.default_sigma))
-                _ema_update(stats, energy, alpha, t)
+                floor = floors.setdefault(index, ChannelStats(t.default_mu, t.default_sigma))
+                _ema_update(floor, energy, alpha, t)
 
 
-def _collect_baseline(engine: ConductorEngine, sensor_id: str, energies: _Energies) -> None:
-    """Collect empty-room frames for active RecordBaseline windows (3.3).
+def collect_baseline_rows(engine: ConductorEngine) -> None:
+    """One tick-aligned calibration row per recording zone (rule 3.3).
 
-    Collection is un-gated: the operator asserts emptiness, and the robust
-    statistics shrug off brief violations. Per-gate samples for the zone's
-    owned gates ride along (3.6).
+    Sampled from the sensor caches on the tick clock — never per entity
+    change, which would weight samples by publish frequency and tear gate
+    tuples across radar frames.
     """
-    move_e, still_e, gate_move, gate_still = energies
-    for zone in engine.config.zones_for_sensor(sensor_id):
+    for zone in engine.config.zones:
         recording = engine.state.zones[zone.zone_id].recording
         if recording is None:
             continue
-        if move_e is not None:
-            recording.move_samples.append(move_e)
-        if still_e is not None:
-            recording.still_samples.append(still_e)
-        for values, samples in (
-            (gate_move, recording.gate_move_samples),
-            (gate_still, recording.gate_still_samples),
+        sensor = engine.state.sensors[zone.sensor_id]
+        if (
+            sensor.last_move_e is None
+            and sensor.last_still_e is None
+            and sensor.last_gate_move is None
+            and sensor.last_gate_still is None
         ):
-            if values is None:
-                continue
-            for index in engine.owned_gates[zone.zone_id]:  # 2.4 / 3.6
-                if index < len(values) and (value := values[index]) is not None:
-                    samples.setdefault(index, []).append(value)
+            continue  # nothing ever reported: no row
+        recording.rows.append(
+            BaselineRow(
+                move_e=sensor.last_move_e,
+                still_e=sensor.last_still_e,
+                gate_move=sensor.last_gate_move,
+                gate_still=sensor.last_gate_still,
+                # 3.1/3.7: held/deduplicated rows repeat one measurement.
+                move_fresh=sensor.move_obs != recording.last_move_obs,
+                still_fresh=sensor.still_obs != recording.last_still_obs,
+            )
+        )
+        recording.last_move_obs = sensor.move_obs
+        recording.last_still_obs = sensor.still_obs
 
 
 def on_record_baseline(
     engine: ConductorEngine, event: RecordBaseline, now: float, plan: Plan
 ) -> None:
-    """Open a calibration window (3.3). Re-issuing restarts the window."""
+    """Open a calibration window (3.3). Re-issuing restarts the window.
+
+    The zone's estimator is suspended for the window: the operator has
+    asserted emptiness, and scoring frames against the old (possibly
+    wrong) floors would let the calibration manufacture occupancy and
+    ratchet home memory. The published state becomes exactly the
+    assertion — empty at the prior — without a ``pass_by`` (nobody
+    traversed; the estimate was declared void).
+    """
     zone = engine.config.zone_or_none(event.zone_id)
     if zone is None:  # unknown zone: ignore
         return
-    engine.state.zones[zone.zone_id].recording = BaselineRecording()
+    zst = engine.state.zones[zone.zone_id]
+    zst.recording = BaselineRecording()
+    zst.lam = engine.lam_prior  # 3.3: pinned at the empty prior
+    zst.occupied = False
+    zst.activity = Activity.EMPTY  # 3.3: no pass_by on this transition
+    zst.occupied_since = None
+    zst.dwell_seconds = 0.0
+    zst.peak_confidence = 0.0
+    zst.still_dominant_since = None
+    zst.move_dominant_since = None
+    zst.motion = False
+    plan.cancel_timer(motion_off(zone.zone_id))  # 4.4 hold is void
+    zst.z_move = zst.z_still = 0.0
+    zst.move_gated = zst.still_gated = False
+    zst.move_from_gates = zst.still_from_gates = False
+    zst.attack_candidate = False  # 4.2: chain cleared
+    zst.attack_count = 0
+    zst.attack_last = None
     duration = event.duration
     if duration is None:
-        duration = engine.config.tunables.baseline_duration  # 3.3: default 120 s
+        duration = engine.config.tunables.baseline_duration  # 3.3: default 300 s
     plan.start_timer(baseline_end(zone.zone_id), duration)  # 3.3
 
 
+def _lag1_autocorr(values: list[float]) -> float:
+    """Lag-1 autocorrelation of a sequence; 0 for degenerate variance."""
+    n = len(values)
+    mean = fmean(values)
+    var = sum((v - mean) ** 2 for v in values)
+    if var <= 0.0:
+        return 0.0
+    cov = sum((values[i] - mean) * (values[i + 1] - mean) for i in range(n - 1))
+    return max(0.0, min(0.999, cov / var))
+
+
+def _distinct(values: list[float]) -> list[float]:
+    """Collapse consecutive duplicates (3.1): held rows are one measurement."""
+    out: list[float] = []
+    for value in values:
+        if not out or value != out[-1]:
+            out.append(value)
+    return out
+
+
+def _stat_of(raws: list[float], m: int, t: Tunables) -> StatBaseline | None:
+    """Empirical ``(m0, s0, c0)`` of the raw statistic over a window (3.7),
+    shrunk toward safety.
+
+    A short window estimates a scale poorly, and an underestimated ``s0``
+    inflates every future score, so: at least ``stat_min_rows`` rows are
+    required (else the analytic fallback stays), and ``s0`` is floored by
+    the analytic reference deviation for the path's gate count — the
+    window may recentre the score but never sharpen it beyond Gaussian.
+    ``c0`` is the measured mean of the exact runtime transform (clamped
+    score) over the window, so the final score is mean-zero on H0 (3.2).
+    """
+    if len(raws) < max(2, t.stat_min_rows):
+        return None
+    reference_s0 = stats.onesided_max_stats(m)[1]  # 3.7: safety floor
+    m0 = fmean(raws)
+    s0 = max(t.stat_sigma_min, reference_s0, pstdev(raws))
+    c0 = fmean(min(t.z_cap, max(-t.z_neg_cap, (raw - m0) / s0)) for raw in raws)
+    # 3.7: integrated autocorrelation time under an AR(1) assumption —
+    # correlated empty noise must integrate at its information rate (3.2).
+    # rho takes its one-sided 95% upper bound (se ~ sqrt((1-rho^2)/n)):
+    # under strong dependence the window holds few independent samples, and
+    # an underestimated tau under-discounts the evidence walk.
+    rho = _lag1_autocorr(raws)
+    rho_ucb = min(0.999, rho + 1.645 * math.sqrt(max(0.0, 1.0 - rho * rho) / len(raws)))
+    tau = max(1.0, min(t.tau_int_max, (1.0 + rho_ucb) / (1.0 - rho_ucb)))
+    return StatBaseline(m0, s0, c0, tau)
+
+
+def _assess_channel(
+    column: list[float], fresh: int, ucb_z: float, t: Tunables
+) -> tuple[ChannelStats | None, ChannelCoverage]:
+    """Candidate floor + coverage verdict for one aggregate channel (3.1,
+    3.3). Touches no zone state — the commit is the caller's decision."""
+    if not column:
+        return None, ChannelCoverage(Coverage.NO_DATA, 0, 0, 0)
+    samples = _distinct(column)  # 3.1: held repeats carry no information
+    counts = (len(column), fresh, len(samples))
+    if len(samples) >= t.stat_min_rows and fresh >= t.stat_min_rows:
+        floor = ChannelStats(*robust_stats(samples, t.sigma_min, t.energy_quantum, ucb_z))
+        return floor, ChannelCoverage(Coverage.CALIBRATED, *counts)
+    if len(column) >= t.stat_min_rows and max(samples) - min(samples) <= t.energy_quantum:
+        # 3.1/3.3: quiescent channel — the empty signal simply never moves;
+        # no scale can or need be estimated beyond the floors.
+        return (
+            ChannelStats(median(samples), t.sigma_min),
+            ChannelCoverage(Coverage.QUIESCENT, *counts),
+        )
+    reason = (
+        f"{fresh} fresh / {len(samples)} distinct observations over "
+        f"{len(column)} rows; need {t.stat_min_rows} — record longer"
+    )
+    return None, ChannelCoverage(Coverage.REJECTED, *counts, reason=reason)
+
+
 def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Plan) -> None:
-    """Close a calibration window and replace ``(mu, sigma)`` (3.3)."""
+    """Close a calibration window (rule 3.3): compute the *candidate*
+    floors (3.1, 3.6), statistics (3.7) and per-path coverage first, then
+    commit atomically — a rejected required path applies and persists
+    nothing, and the previous calibration survives untouched."""
     zone = engine.config.zone_or_none(zone_id)
     if zone is None:
         return
@@ -276,31 +541,126 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
     if recording is None:
         return
     t = engine.config.tunables
-    if not (
-        recording.move_samples
-        or recording.still_samples
-        or recording.gate_move_samples
-        or recording.gate_still_samples
+    rows = recording.rows
+    owned = engine.owned_gates[zone.zone_id]  # 2.4
+    # 3.7: statistics over fresh rows only — held rows repeat measurements.
+    move_rows = [row for row in rows if row.move_fresh]
+    still_rows = [row for row in rows if row.still_fresh]
+    coverage: dict[str, ChannelCoverage] = {}
+    stat_candidates: dict[str, StatBaseline] = {}
+
+    # ---- aggregate candidates (3.1) -----------------------------------
+    agg_floors: dict[str, ChannelStats] = {}
+    for key, column, fresh in (
+        (
+            "move_agg",
+            [r.move_e for r in rows if r.move_e is not None],
+            sum(r.move_e is not None for r in move_rows),
+        ),
+        (
+            "still_agg",
+            [r.still_e for r in rows if r.still_e is not None],
+            sum(r.still_e is not None for r in still_rows),
+        ),
     ):
-        return  # nothing observed: keep the old floors, persist nothing
-    # A channel or gate that produced no samples keeps its previous floor.
-    if recording.move_samples:
-        mu, sigma = robust_stats(recording.move_samples, t.sigma_min)  # 3.1
-        zst.move_baseline = ChannelStats(mu, sigma)  # 3.3
-    if recording.still_samples:
-        mu, sigma = robust_stats(recording.still_samples, t.sigma_min)  # 3.1
-        zst.still_baseline = ChannelStats(mu, sigma)  # 3.3
-    # 3.6: per-gate floors are replaced alongside the aggregates.
-    for samples_by_gate, floors in (
-        (recording.gate_move_samples, zst.gate_move_baselines),
-        (recording.gate_still_samples, zst.gate_still_baselines),
+        floor, cov = _assess_channel(column, fresh, _UCB_Z, t)
+        coverage[key] = cov
+        if floor is not None:
+            agg_floors[key] = floor
+    # 3.7: the statistic is scored against the floors that will be in
+    # force after the commit — the candidate where accepted, else the old.
+    for key, fresh_rows, value_of, old_floor in (
+        ("move_agg", move_rows, lambda r: r.move_e, zst.move_baseline),
+        ("still_agg", still_rows, lambda r: r.still_e, zst.still_baseline),
     ):
-        for index in sorted(samples_by_gate):
-            mu, sigma = robust_stats(samples_by_gate[index], t.sigma_min)  # 3.1
-            floors[index] = ChannelStats(mu, sigma)  # 3.3 / 3.6
-    zst.last_adapt_at = None  # new floor: re-anchor the adaptation EMA
-    # 3.3: baselines persist in the config entry (adapter saves them).
-    plan.persist_calibration = True
+        if coverage[key].status is Coverage.CALIBRATED:
+            floor = agg_floors.get(key, old_floor)
+            raws = [onesided_z(v, floor) for r in fresh_rows if (v := value_of(r)) is not None]
+            if (stat := _stat_of(raws, 1, t)) is not None:
+                stat_candidates[key] = stat
+
+    # ---- gate-path candidates (3.1 family-wise, 3.6, 3.7) --------------
+    gate_z = stats.family_ucb_z(len(owned))  # 3.1: simultaneous coverage
+    gate_floors: dict[str, dict[int, ChannelStats]] = {}
+    for key, fresh_rows, column_of, old_floors in (
+        ("move_gate", move_rows, lambda r: r.gate_move, zst.gate_move_baselines),
+        ("still_gate", still_rows, lambda r: r.gate_still, zst.gate_still_baselines),
+    ):
+        floors: dict[int, ChannelStats] = {}
+        all_quiescent = True
+        for index in owned:
+            column = [
+                values[index]
+                for row in rows
+                if (values := column_of(row)) is not None
+                and index < len(values)
+                and values[index] is not None
+            ]
+            if not column:
+                continue
+            samples = _distinct(column)
+            if len(samples) >= t.stat_min_rows:
+                floors[index] = ChannelStats(
+                    *robust_stats(samples, t.sigma_min, t.energy_quantum, gate_z)
+                )
+                all_quiescent = False
+            elif len(column) >= t.stat_min_rows and max(samples) - min(samples) <= (
+                t.energy_quantum
+            ):
+                floors[index] = ChannelStats(median(samples), t.sigma_min)
+            else:
+                all_quiescent = False  # a reporting gate we could not certify
+        gate_floors[key] = floors
+        data_rows = sum(
+            1
+            for row in rows
+            if (values := column_of(row)) is not None
+            and any(i < len(values) and values[i] is not None for i in owned)
+        )
+        # The statistic captures whatever floor mix will be in force (3.7).
+        merged = {**old_floors, **floors}
+        raws = [
+            s
+            for row in fresh_rows
+            if (s := gate_statistic(column_of(row), owned, merged, t)) is not None
+        ]
+        counts = (data_rows, len(raws), len(_distinct(raws)))
+        if data_rows == 0:
+            coverage[key] = ChannelCoverage(Coverage.NO_DATA, 0, 0, 0)
+        elif (stat := _stat_of(raws, len(owned), t)) is not None:
+            stat_candidates[key] = stat
+            coverage[key] = ChannelCoverage(Coverage.CALIBRATED, *counts)
+        elif floors and all_quiescent and data_rows >= t.stat_min_rows:
+            coverage[key] = ChannelCoverage(Coverage.QUIESCENT, *counts)
+        else:
+            reason = (
+                f"{len(raws)} fresh gate observations over {data_rows} rows; "
+                f"need {t.stat_min_rows} — record longer"
+            )
+            coverage[key] = ChannelCoverage(Coverage.REJECTED, *counts, reason=reason)
+
+    # ---- atomic commit (3.3) -------------------------------------------
+    required = ["move_agg", "still_agg"]
+    if t.use_gate_evidence and owned:
+        required += ["move_gate", "still_gate"]  # 2.6: opt-in production path
+    rejected = any(coverage[key].status is Coverage.REJECTED for key in required)
+    materialized = any(
+        cov.status in (Coverage.CALIBRATED, Coverage.QUIESCENT) for cov in coverage.values()
+    )
+    success = not rejected and materialized
+    if success:
+        if (floor := agg_floors.get("move_agg")) is not None:
+            zst.move_baseline = floor
+        if (floor := agg_floors.get("still_agg")) is not None:
+            zst.still_baseline = floor
+        zst.gate_move_baselines.update(gate_floors["move_gate"])  # 3.6
+        zst.gate_still_baselines.update(gate_floors["still_gate"])
+        # 3.7 full replace: paths without an accepted empirical statistic
+        # fall back to the analytic values.
+        zst.stat_cal = stat_candidates
+        zst.last_adapt_at = None  # new floor: re-anchor the adaptation EMA
+        # 3.3: baselines persist in the config entry (adapter saves them).
+        plan.persist_calibration = True
     plan.emit(
         BaselineRecorded(
             zone_id=zone.zone_id,
@@ -308,6 +668,8 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
             move_sigma=zst.move_baseline.sigma,
             still_mu=zst.still_baseline.mu,
             still_sigma=zst.still_baseline.sigma,
-            frame_count=max(len(recording.move_samples), len(recording.still_samples)),
+            frame_count=len(rows),
+            success=success,
+            coverage=coverage,
         )
     )

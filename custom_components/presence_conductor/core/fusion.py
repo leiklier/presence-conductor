@@ -21,8 +21,8 @@ if TYPE_CHECKING:
 def refresh(engine: ConductorEngine, now: float, dt: float = 0.0) -> None:
     """Recompute all fused outputs from zone state.
 
-    ``dt`` is the elapsed time for home-level decay: positive on ticks,
-    zero on frames/events (which may only *raise* home presence, 6.5).
+    ``dt`` is the elapsed time for home-level decay — the same interval the
+    zones just integrated (4.1), whatever event advanced the clock (6.5).
     """
     _refresh_rooms(engine)
     _refresh_home(engine, dt)
@@ -45,7 +45,7 @@ def _refresh_rooms(engine: ConductorEngine) -> None:
             # 6.3: all members unknown -> publish unknown, not off.
             room.occupied = None
             room.motion = None
-            room.probability = None
+            room.confidence = None
             room.activity = None
             room.settled = None
             continue
@@ -54,12 +54,11 @@ def _refresh_rooms(engine: ConductorEngine) -> None:
         # 6.2: motion iff any healthy member zone's motion channel (4.4) is
         # on — the same undamped fast channel, fused with OR.
         room.motion = any(zst.motion for zst in healthy)
-        # 6.1: noisy-OR over member posteriors, for diagnostics. Monotone by
-        # construction (6.4).
-        p_none = 1.0
-        for zst in healthy:
-            p_none *= 1.0 - zst.probability
-        room.probability = 1.0 - p_none
+        # 6.1: max member confidence, for diagnostics — not noisy-OR, which
+        # assumes independence the members do not have (shared boundary
+        # gates, the same person, cross-covering sensors) and accumulates
+        # even empty priors. Monotone by construction (6.4).
+        room.confidence = max(zst.confidence for zst in healthy)
         # 6.2: maximum-severity member state; settled iff any member SETTLED.
         room.activity = max((zst.activity for zst in healthy), key=lambda a: ACTIVITY_SEVERITY[a])
         room.settled = any(zst.activity is Activity.SETTLED for zst in healthy)
@@ -73,12 +72,12 @@ def _refresh_home(engine: ConductorEngine, dt: float) -> None:
         # 6.5: all zones unhealthy -> anyone_home publishes unknown.
         # lam_home freezes: with no data, decaying would claim knowledge.
         state.anyone_home = None
-        state.home_probability = None
+        state.home_confidence = None
         return
     occupied_lams = [zst.lam for zst in healthy if zst.occupied]
     if occupied_lams:
         # 6.5: any healthy occupied zone drives home presence up immediately
-        # (evidence, like 4.1). Ratchet to the strongest member posterior.
+        # (evidence, like 4.1). Ratchet to the strongest member belief.
         state.lam_home = max(state.lam_home, max(occupied_lams))
     elif dt > 0.0:
         # 6.5: with all zones empty, decay toward the empty prior with
@@ -95,4 +94,4 @@ def _refresh_home(engine: ConductorEngine, dt: float) -> None:
     elif engine._home_on and state.lam_home <= engine.lam_home_off:
         engine._home_on = False
     state.anyone_home = engine._home_on
-    state.home_probability = belief.sigmoid(state.lam_home)
+    state.home_confidence = belief.sigmoid(state.lam_home)

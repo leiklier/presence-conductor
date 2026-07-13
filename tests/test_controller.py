@@ -157,6 +157,9 @@ async def test_engine_started_with_monotonic_now(hass: HomeAssistant, monkeypatc
         still_distance_cm=0.0,
         move_energy=2.0,
         still_energy=2.0,
+        move_obs=frame.move_obs,
+        still_obs=frame.still_obs,
+        move_energy_obs=frame.move_energy_obs,
     )
     assert fake.snapshot.baselines["sofakrok"].still_mu == 0.3
 
@@ -179,25 +182,52 @@ async def test_any_entity_change_produces_complete_frame(hass: HomeAssistant, mo
 
     hass.states.async_set(KONTOR_ENTITIES["move_energy"], "42.5")
     await hass.async_block_till_done()
-    assert fake.events_of(SensorFrame)[-1] == SensorFrame(
+    frame = fake.events_of(SensorFrame)[-1]
+    assert frame == SensorFrame(
         sensor_id=KONTOR,
         moving_distance_cm=0.0,
         still_distance_cm=0.0,
         move_energy=42.5,
         still_energy=2.0,
+        move_obs=frame.move_obs,
+        still_obs=frame.still_obs,
+        move_energy_obs=frame.move_energy_obs,
     )
+    first_move_obs = frame.move_obs
+    first_still_obs = frame.still_obs
+    first_energy_obs = frame.move_energy_obs
 
     # The next change reuses the cached view: the energy sticks.
     hass.states.async_set(KONTOR_ENTITIES["moving_target"], "on")
     await hass.async_block_till_done()
-    assert fake.events_of(SensorFrame)[-1] == SensorFrame(
+    frame = fake.events_of(SensorFrame)[-1]
+    # 1.1 observation clock: the flag observed the move channel (verified
+    # firmware guarantee — an unchanged energy state is the current
+    # measurement), but the attack counter accepts nothing except an
+    # actual energy publication (4.2).
+    assert frame.move_obs == first_move_obs + 1
+    assert frame.still_obs == first_still_obs
+    assert frame.move_energy_obs == first_energy_obs
+    assert frame == SensorFrame(
         sensor_id=KONTOR,
         moving_distance_cm=0.0,
         still_distance_cm=0.0,
         move_energy=42.5,
         still_energy=2.0,
         has_moving_target=True,
+        move_obs=frame.move_obs,
+        still_obs=frame.still_obs,
+        move_energy_obs=frame.move_energy_obs,
     )
+
+    # Distance churn observes its own channel only — and never the attack
+    # counter (rule 1.1 / 4.2).
+    hass.states.async_set(KONTOR_ENTITIES["still_distance"], "123.0")
+    await hass.async_block_till_done()
+    frame = fake.events_of(SensorFrame)[-1]
+    assert frame.move_obs == first_move_obs + 1
+    assert frame.still_obs == first_still_obs + 1
+    assert frame.move_energy_obs == first_energy_obs
 
 
 async def test_unknown_fields_are_none(hass: HomeAssistant, monkeypatch) -> None:
@@ -544,20 +574,20 @@ async def test_pass_by_fires_bus_event_and_event_entities(hass: HomeAssistant, m
     assert len(captured) == 1
     assert captured[0].data == {
         "zone_id": "sofakrok",
-        "peak_probability": 0.9312,
+        "peak_confidence": 0.9312,
         "duration": 3.22,
     }
     entity_state = hass.states.get("event.presence_conductor_sofakrok_pass_by")
     assert entity_state.state != "unknown"  # a timestamp: the event fired
     assert entity_state.attributes["event_type"] == "pass_by"
-    assert entity_state.attributes["peak_probability"] == 0.9312
+    assert entity_state.attributes["peak_confidence"] == 0.9312
     assert entity_state.attributes["duration"] == 3.22
     # The zone's room fired too (§6 membership), carrying the zone id.
     room_state = hass.states.get("event.presence_conductor_stue_room_pass_by")
     assert room_state.state != "unknown"
     assert room_state.attributes["event_type"] == "pass_by"
     assert room_state.attributes["zone_id"] == "sofakrok"
-    assert room_state.attributes["peak_probability"] == 0.9312
+    assert room_state.attributes["peak_confidence"] == 0.9312
     assert room_state.attributes["duration"] == 3.22
     # The other room saw nothing.
     assert hass.states.get("event.presence_conductor_kontor_room_pass_by").state == "unknown"

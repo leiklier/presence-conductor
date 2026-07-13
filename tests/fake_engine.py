@@ -40,7 +40,7 @@ class FakeEngine:
         t = config.tunables
         self.state = EngineState()
         self.state.lam_home = logit(t.p_prior)
-        self.state.home_probability = sigmoid(self.state.lam_home)
+        self.state.home_confidence = sigmoid(self.state.lam_home)
         for sensor in config.sensors:
             self.state.sensors[sensor.sensor_id] = SensorState(
                 available=snapshot.available.get(sensor.sensor_id, True)
@@ -58,7 +58,7 @@ class FakeEngine:
             room = self.state.rooms[room_id] = RoomState()
             room.occupied = False
             room.motion = False
-            room.probability = t.p_prior
+            room.confidence = t.p_prior
             room.activity = Activity.EMPTY
             room.settled = False
 

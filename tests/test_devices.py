@@ -71,7 +71,7 @@ async def test_entities_live_on_their_room_device(hass: HomeAssistant, monkeypat
         ("binary_sensor", "occupancy"),
         ("binary_sensor", "motion"),
         ("sensor", "activity"),
-        ("sensor", "probability"),
+        ("sensor", "confidence"),
         ("sensor", "dwell"),
         ("event", "pass_by"),
         ("button", "record_baseline"),
@@ -85,14 +85,14 @@ async def test_entities_live_on_their_room_device(hass: HomeAssistant, monkeypat
         ("binary_sensor", "motion"),
         ("binary_sensor", "settled"),
         ("sensor", "activity"),
-        ("sensor", "probability"),
+        ("sensor", "confidence"),
         ("event", "pass_by"),
     ):
         assert device_of(platform, f"{entry.entry_id}_room_stue_{suffix}") == stue.id
 
     # Home outputs, controls and diagnostics stay on the hub.
     assert device_of("binary_sensor", f"{entry.entry_id}_anyone_home") == hub.id
-    assert device_of("sensor", f"{entry.entry_id}_home_probability") == hub.id
+    assert device_of("sensor", f"{entry.entry_id}_home_confidence") == hub.id
     assert device_of("switch", f"{entry.entry_id}_enabled") == hub.id
     assert device_of("sensor", f"{entry.entry_id}_state") == hub.id
 
@@ -135,7 +135,7 @@ async def test_zone_state_entities_are_opt_in(hass: HomeAssistant, monkeypatch) 
         ("binary_sensor", "occupancy"),
         ("binary_sensor", "motion"),
         ("sensor", "activity"),
-        ("sensor", "probability"),
+        ("sensor", "confidence"),
         ("sensor", "dwell"),
         ("event", "pass_by"),
     ):
@@ -155,9 +155,9 @@ async def test_room_and_home_entities_stay_enabled(hass: HomeAssistant, monkeypa
     registry = er.async_get(hass)
     unique_ids = [
         f"{entry.entry_id}_room_stue_{suffix}"
-        for suffix in ("occupancy", "motion", "settled", "activity", "probability", "pass_by")
+        for suffix in ("occupancy", "motion", "settled", "activity", "confidence", "pass_by")
     ]
-    unique_ids += [f"{entry.entry_id}_anyone_home", f"{entry.entry_id}_home_probability"]
+    unique_ids += [f"{entry.entry_id}_anyone_home", f"{entry.entry_id}_home_confidence"]
     for unique_id in unique_ids:
         entries = [
             registry.async_get(entity_id)
