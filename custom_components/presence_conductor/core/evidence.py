@@ -68,7 +68,22 @@ def robust_stats(samples: list[float], sigma_min: float, quantum: float) -> tupl
     mu = median(samples)
     deviations = sorted(abs(s - mu) for s in samples)
     n = len(deviations)
-    k = min(n, math.ceil(n / 2 + _UCB_Z * math.sqrt(n) / 2))  # 1-based rank
+    # Dependence discount (3.1/3.7): the rank bound counts Bernoulli
+    # trials, and autocorrelated samples carry fewer effective trials —
+    # n_eff = n(1-rho)/(1+rho) with rho at its own upper bound. The
+    # binomial sd then inflates from sqrt(n)/2 to n/(2*sqrt(n_eff)).
+    # rho comes from the lag-1 sign agreement around the median (the rank
+    # trials ARE those signs), which outliers cannot poison.
+    signs = [1 if sample > mu else -1 for sample in samples if sample != mu]
+    agree = (
+        sum(a == b for a, b in zip(signs, signs[1:], strict=False)) / (len(signs) - 1)
+        if len(signs) > 1
+        else 0.0
+    )
+    rho = max(0.0, 2.0 * agree - 1.0)
+    rho = min(0.999, rho + _UCB_Z * math.sqrt(max(0.0, 1.0 - rho * rho) / n))
+    n_eff = max(2.0, n * (1.0 - rho) / (1.0 + rho))
+    k = min(n, math.ceil(n / 2 + _UCB_Z * n / (2.0 * math.sqrt(n_eff))))  # 1-based rank
     mad_ucb = deviations[k - 1]
     return mu, max(sigma_min, MAD_TO_SIGMA * (mad_ucb + quantum / 2.0))
 
@@ -471,8 +486,12 @@ def _stat_of(raws: list[float], m: int, t: Tunables) -> StatBaseline | None:
     c0 = fmean(min(t.z_cap, max(-t.z_neg_cap, (raw - m0) / s0)) for raw in raws)
     # 3.7: integrated autocorrelation time under an AR(1) assumption —
     # correlated empty noise must integrate at its information rate (3.2).
+    # rho takes its one-sided 95% upper bound (se ~ sqrt((1-rho^2)/n)):
+    # under strong dependence the window holds few independent samples, and
+    # an underestimated tau under-discounts the evidence walk.
     rho = _lag1_autocorr(raws)
-    tau = max(1.0, min(t.tau_int_max, (1.0 + rho) / (1.0 - rho)))
+    rho_ucb = min(0.999, rho + 1.645 * math.sqrt(max(0.0, 1.0 - rho * rho) / len(raws)))
+    tau = max(1.0, min(t.tau_int_max, (1.0 + rho_ucb) / (1.0 - rho_ucb)))
     return StatBaseline(m0, s0, c0, tau)
 
 

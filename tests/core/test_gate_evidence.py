@@ -217,9 +217,9 @@ class TestRule36PerGateFloors:
         desk = h.zone(DESK)
         assert desk.recording is None
         assert desk.gate_move_baselines[1].mu == pytest.approx(0.10, abs=0.011)
-        # 3.1: UCB of the deviations (0.01 here — one outlier, not two) +
-        # half quantum, times 1.4826.
-        assert desk.gate_move_baselines[1].sigma == pytest.approx(1.4826 * 0.015, abs=0.002)
+        # 3.1: dependence-discounted UCB of the deviations + half quantum,
+        # times 1.4826.
+        assert desk.gate_move_baselines[1].sigma == pytest.approx(1.4826 * 0.025, abs=0.002)
         assert desk.gate_still_baselines[1].mu == pytest.approx(0.10, abs=0.011)
         # Gate 2 reported nothing during the window: previous floor kept.
         assert desk.gate_move_baselines[2].mu == pytest.approx(MU)

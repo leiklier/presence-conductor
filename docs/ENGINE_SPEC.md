@@ -167,11 +167,13 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   `sigma = MAD_TO_SIGMA · (UCB(median |deviation|) + energy_quantum / 2)`,
   floored by `sigma_min`, where `UCB` is the one-sided 95% upper
   confidence bound for a median: the k-th order statistic of the absolute
-  deviations with `k = ceil(n/2 + 1.645 · sqrt(n) / 2)`. The samples are
-  the window's **distinct observations** — consecutive duplicate values
-  are collapsed first, because held/deduplicated rows repeat one
-  measurement and a rank bound computed over repeats overstates its
-  confidence. A channel whose distinct samples span at most one quantum is
+  deviations with `k = ceil(n/2 + 1.645 · n / (2 · sqrt(n_eff)))`, where
+  `n_eff = n(1 − ρ̂)/(1 + ρ̂)` discounts the trial count for dependence
+  (`ρ̂` at its own upper bound; independent samples give back
+  `sqrt(n)/2`). The samples are the window's **distinct observations** —
+  consecutive duplicate values are collapsed first, because
+  held/deduplicated rows repeat one measurement and a rank bound computed
+  over repeats overstates its confidence. A channel whose distinct samples span at most one quantum is
   *quiescent* and calibrates to `(value, sigma_min)` directly; a channel
   with fewer than `stat_min_rows` distinct samples that is not quiescent
   keeps its previous floor — re-run with a longer `duration` instead.
@@ -304,10 +306,12 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   until long-run empty recordings exist to certify anything sharper (8.7).
   Statistics are computed over the window's **fresh rows** only (rows on
   which the path's observation counter advanced, 1.1); the lag-1
-  autocorrelation `ρ̂` of that fresh sequence yields
-  `τ̂ = clamp((1 + ρ̂)/(1 − ρ̂), 1, tau_int_max)` (AR(1) assumption,
-  `tau_int_max` default 25), stored with the statistic and applied at
-  runtime (3.2). A path whose fresh rows fall below `stat_min_rows` keeps
+  autocorrelation `ρ̂` of that fresh sequence — taken at its one-sided
+  95% upper confidence bound, since a strongly dependent window holds few
+  independent samples and an underestimated discount under-protects —
+  yields `τ̂ = clamp((1 + ρ̂)/(1 − ρ̂), 1, tau_int_max)` (AR(1)
+  assumption, `tau_int_max` default 25), stored with the statistic and
+  applied at runtime (3.2). A path whose fresh rows fall below `stat_min_rows` keeps
   the analytic fallback — if that happens, the room's traffic is too
   deduplicated for a 120 s window: re-run with a longer `duration`.
 - **3.8 Held evidence and the observation clock.** The integrator (4.1)
