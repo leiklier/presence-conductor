@@ -68,6 +68,10 @@ from .const import (
     CONF_BASELINES,
     DOMAIN,
     ENERGY_ROLES,
+    GATE_COUNT,
+    GATE_MOVE_ROLES,
+    GATE_ROLES,
+    GATE_STILL_ROLES,
     ROLE_MOVE_ENERGY,
     ROLE_MOVING_DISTANCE,
     ROLE_MOVING_TARGET,
@@ -77,7 +81,7 @@ from .const import (
     ROLE_TARGET,
 )
 from .core.events import Event, SensorAvailability, SensorFrame, Tick
-from .core.model import ConductorConfig, EngineState, InitialSnapshot
+from .core.model import ChannelStats, ConductorConfig, EngineState, InitialSnapshot
 from .core.plan import PassBy, Plan
 
 _LOGGER = logging.getLogger(__name__)
@@ -88,7 +92,7 @@ EVENT_PASS_BY = f"{DOMAIN}_pass_by"
 UNAVAILABLE_STATES = (STATE_UNAVAILABLE, STATE_UNKNOWN)
 
 #: Frame roles the controller subscribes to. ``detection_distance`` is part
-#: of the LD2410 cluster but not consumed by the v1 estimator (const.py), so
+#: of the LD2410 cluster but not consumed by the estimator (const.py), so
 #: its churn never produces frames.
 FRAME_ROLES: tuple[str, ...] = (
     ROLE_MOVE_ENERGY,
@@ -99,6 +103,17 @@ FRAME_ROLES: tuple[str, ...] = (
     ROLE_MOVING_TARGET,
     ROLE_STILL_TARGET,
 )
+
+#: Gate role -> (channel, gate index), e.g. ``"g3_move" -> ("move", 3)``.
+#: Gate entities are optional enrichment (spec rules 2.4-2.6): subscribed
+#: and folded into frames when configured, but never part of availability
+#: (rule 1.3 stays keyed to the two aggregate energy roles) — engineering
+#: mode may drop at any radar power-cycle and the engine falls back to the
+#: aggregate path per frame.
+_GATE_ROLE_INDEX: dict[str, tuple[str, int]] = {
+    **{role: ("move", index) for index, role in enumerate(GATE_MOVE_ROLES)},
+    **{role: ("still", index) for index, role in enumerate(GATE_STILL_ROLES)},
+}
 
 
 class EngineProtocol(Protocol):
@@ -143,11 +158,28 @@ class _SensorView:
     has_target: bool = False
     has_moving_target: bool = False
     has_still_target: bool = False
+    #: Per-gate energies (rules 2.4-2.6): ``None`` when the sensor has no
+    #: gate entities configured for the channel; individual gates are
+    #: ``None`` while unknown/unavailable (engineering mode off) — the
+    #: engine falls back to the aggregate path per frame (rule 2.6).
+    gate_move: list[float | None] | None = None
+    gate_still: list[float | None] | None = None
     #: Availability over the required (energy) roles, rule 1.3.
     available: bool = False
 
     def update(self, role: str, state: State | None) -> None:
         """Fold one entity state into the view."""
+        if (gate := _GATE_ROLE_INDEX.get(role)) is not None:
+            channel, index = gate
+            values = self.gate_move if channel == "move" else self.gate_still
+            if values is None:
+                values = [None] * GATE_COUNT
+                if channel == "move":
+                    self.gate_move = values
+                else:
+                    self.gate_still = values
+            values[index] = _as_float(state)
+            return
         match role:
             case "move_energy":
                 self.move_energy = _as_float(state)
@@ -176,13 +208,15 @@ class _SensorView:
             has_target=self.has_target,
             has_moving_target=self.has_moving_target,
             has_still_target=self.has_still_target,
+            gate_move=None if self.gate_move is None else tuple(self.gate_move),
+            gate_still=None if self.gate_still is None else tuple(self.gate_still),
         )
 
 
 def _build_view(hass: HomeAssistant, roles: Mapping[str, str]) -> _SensorView:
     """A view of one sensor's current entity states."""
     view = _SensorView()
-    for role in FRAME_ROLES:
+    for role in (*FRAME_ROLES, *GATE_ROLES):
         if (entity_id := roles.get(role)) is not None:
             view.update(role, hass.states.get(entity_id))
     view.available = _required_available(hass, roles)
@@ -259,7 +293,7 @@ class PresenceConductorController:
         self._roles_by_sensor: dict[str, dict[str, str]] = sensor_entities(entry.options)
         self._sensor_role_by_entity: dict[str, tuple[str, str]] = {}
         for sensor_id, roles in self._roles_by_sensor.items():
-            for role in FRAME_ROLES:
+            for role in (*FRAME_ROLES, *GATE_ROLES):
                 if (entity_id := roles.get(role)) is not None:
                     self._sensor_role_by_entity[entity_id] = (sensor_id, role)
 
@@ -438,16 +472,34 @@ class PresenceConductorController:
         never touches the entry.
         """
         stored: dict[str, Any] = dict(self.entry.options.get(CONF_BASELINES) or {})
-        current = {
-            zone.zone_id: {
+        default = ChannelStats(self.config.tunables.default_mu, self.config.tunables.default_sigma)
+        current: dict[str, Any] = {}
+        for zone in self.config.zones:
+            zst = self.engine.state.zones.get(zone.zone_id)
+            if zst is None:
+                continue
+            record: dict[str, Any] = {
                 "move_mu": zst.move_baseline.mu,
                 "move_sigma": zst.move_baseline.sigma,
                 "still_mu": zst.still_baseline.mu,
                 "still_sigma": zst.still_baseline.sigma,
             }
-            for zone in self.config.zones
-            if (zst := self.engine.state.zones.get(zone.zone_id)) is not None
-        }
+            # Rule 3.6: optional per-gate floors (string keys: options are
+            # JSON). Zones without any stay schema-identical to v0.1.0. A
+            # gate calibrated on one channel only persists the defaults for
+            # the other, which is what the engine would score with anyway.
+            gates = {
+                str(index): {
+                    "move_mu": (gm := zst.gate_move_baselines.get(index, default)).mu,
+                    "move_sigma": gm.sigma,
+                    "still_mu": (gs := zst.gate_still_baselines.get(index, default)).mu,
+                    "still_sigma": gs.sigma,
+                }
+                for index in sorted(zst.gate_move_baselines.keys() | zst.gate_still_baselines)
+            }
+            if gates:
+                record["gates"] = gates
+            current[zone.zone_id] = record
         merged = {**stored, **current}
         if merged == stored:
             return

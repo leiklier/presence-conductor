@@ -15,6 +15,7 @@ from custom_components.presence_conductor.config import (
     sensor_entities,
 )
 from custom_components.presence_conductor.core.model import (
+    GateBaselines,
     RoomConfig,
     SensorConfig,
     Tunables,
@@ -157,3 +158,38 @@ def test_sensor_entities_mapping() -> None:
         "sensor.apollo_msr_2_fadea8_radar_detection_distance"
     )
     assert sensor_entities({}) == {}
+
+
+def test_gate_size_cm_defaults_and_overrides() -> None:
+    """Rule 2.4: per-sensor gate size; absent means the 0.75 m resolution."""
+    options = _options()
+    options["sensors"][0]["gate_size_cm"] = 20
+    config = build_config(options)
+    assert config.sensors[0].gate_size_cm == 20.0
+    assert config.sensors[1].gate_size_cm == 75.0
+
+
+def test_gate_entities_pass_through_the_sensor_mapping() -> None:
+    """Gate roles are ordinary entries in the entities map (rules 2.4-2.6)."""
+    options = _options()
+    options["sensors"][0]["entities"]["g0_move"] = "sensor.apollo_msr_2_f79794_g0_move_energy"
+    entities = sensor_entities(options)
+    assert entities["apollo_msr_2_sofakrok"]["g0_move"] == (
+        "sensor.apollo_msr_2_f79794_g0_move_energy"
+    )
+
+
+def test_baselines_gates_round_trip() -> None:
+    """Rule 3.6: the optional "gates" mapping (string keys, JSON) becomes
+    int-keyed GateBaselines; entries without it load with none (v0.1.0)."""
+    options = _options()
+    options["baselines"]["sofakrok"]["gates"] = {
+        "2": {"move_mu": 0.01, "move_sigma": 0.02, "still_mu": 0.30, "still_sigma": 0.04},
+        "3": {"move_mu": 0.05, "move_sigma": 0.05, "still_mu": 0.05, "still_sigma": 0.05},
+    }
+    baselines = baselines_from_options(options)
+    assert baselines["sofakrok"].gates == {
+        2: GateBaselines(move_mu=0.01, move_sigma=0.02, still_mu=0.30, still_sigma=0.04),
+        3: GateBaselines(move_mu=0.05, move_sigma=0.05, still_mu=0.05, still_sigma=0.05),
+    }
+    assert baselines["kontor"].gates == {}  # backward compatible (3.6)

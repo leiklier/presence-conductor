@@ -30,6 +30,7 @@ from homeassistant.helpers import (
 
 from .const import (
     DISTANCE_ROLES,
+    GATE_COUNT,
     ROLE_DETECTION_DISTANCE,
     ROLE_MOVE_ENERGY,
     ROLE_MOVING_DISTANCE,
@@ -38,6 +39,8 @@ from .const import (
     ROLE_STILL_ENERGY,
     ROLE_STILL_TARGET,
     ROLE_TARGET,
+    gate_move_role,
+    gate_still_role,
 )
 
 #: Entity-id / unique-id suffix -> (entity domain, role). This is the Apollo
@@ -53,6 +56,12 @@ SUFFIX_ROLES: dict[str, tuple[str, str]] = {
     "_radar_moving_target": ("binary_sensor", ROLE_MOVING_TARGET),
     "_radar_still_target": ("binary_sensor", ROLE_STILL_TARGET),
 }
+# Engineering-mode per-gate energies (``_g0_move_energy`` .. ``_g8_still_energy``,
+# spec rules 2.4-2.6): mapped when present, but a device qualifies without
+# them — gates are optional enrichment (spec 8.1).
+for _index in range(GATE_COUNT):
+    SUFFIX_ROLES[f"_g{_index}_move_energy"] = ("sensor", gate_move_role(_index))
+    SUFFIX_ROLES[f"_g{_index}_still_energy"] = ("sensor", gate_still_role(_index))
 
 #: Longest suffix first, so e.g. ``_radar_moving_target`` can never be
 #: shadowed by a shorter suffix another firmware might add.

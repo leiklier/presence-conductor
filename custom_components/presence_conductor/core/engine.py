@@ -20,7 +20,7 @@ mutable state, and every iteration follows config declaration order.
 
 from __future__ import annotations
 
-from . import activity, evidence, fusion, health, timers
+from . import activity, evidence, fusion, gating, health, timers
 from . import filter as filter_
 from .belief import logit
 from .events import (
@@ -59,6 +59,14 @@ class ConductorEngine:
         self.lam_max = logit(t.p_max)  # 4.5
         self.lam_home_on = logit(t.theta_home_on)  # 6.5
         self.lam_home_off = logit(t.theta_home_off)  # 6.5
+        #: Gate ownership per zone (rule 2.4), derived from config once at
+        #: construction (7.3) like the thresholds above.
+        self.owned_gates: dict[str, tuple[int, ...]] = {
+            zone.zone_id: gating.owned_gates(
+                zone, config.sensor(zone.sensor_id).gate_size_cm, t.margin_cm
+            )
+            for zone in config.zones
+        }
         #: Timer keys the engine believes are pending at the adapter.
         self._pending_timers: set[str] = set()
         #: Home-presence hysteresis latch (6.5).
@@ -94,6 +102,13 @@ class ConductorEngine:
                 if persisted
                 else ChannelStats(t.default_mu, t.default_sigma),
             )
+            if persisted is not None:
+                # 3.6: persisted per-gate floors; zones stored before
+                # per-gate evidence existed simply have none.
+                for index in sorted(persisted.gates):
+                    gate = persisted.gates[index]
+                    zst.gate_move_baselines[index] = ChannelStats(gate.move_mu, gate.move_sigma)
+                    zst.gate_still_baselines[index] = ChannelStats(gate.still_mu, gate.still_sigma)
             if not state.sensors[zone.sensor_id].available:
                 zst.health = Health.UNKNOWN  # 1.3
             state.zones[zone.zone_id] = zst
@@ -102,7 +117,9 @@ class ConductorEngine:
         # Ingest the snapshot frames as initial evidence so the first ticks
         # integrate reality, then apply the 7.1 exception: zones whose
         # sensor currently reports a gated target start at theta_on -
-        # someone plainly there should not wait out a cold start.
+        # someone plainly there should not wait out a cold start. Snapshot
+        # frames may carry gate data; under gate precedence (2.6) the gated
+        # flags are spatial, so only zones whose own gates are elevated adopt.
         for sensor in self.config.sensors:
             frame = snapshot.frames.get(sensor.sensor_id)
             if frame is None:

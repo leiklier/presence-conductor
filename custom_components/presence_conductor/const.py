@@ -10,8 +10,15 @@ controller (a later PR) is the single reader, via :func:`.config.build_config`.
   ``{"sensor_id", "name", "entities": {role: entity_id}}``. ``sensor_id`` is a
   slug of the device name taken at configuration time and then *stored*, so
   later device/entity renames never change it. The ``entities`` map uses the
-  ``ROLE_*`` constants below; energies and both plain distances are always
-  present, ``detection_distance`` and the binary target roles are optional.
+  ``ROLE_*``/gate-role constants below; energies and both plain distances are
+  always present, ``detection_distance``, the binary target roles and the
+  per-gate energy roles are optional. Gate roles (``g0_move``..``g8_still``)
+  are filled by discovery when the device exposes engineering-mode gate
+  entities; the manual sensor form deliberately omits them (18 selectors
+  would drown it), so gate consumption is discovered-only by design. An
+  optional ``"gate_size_cm"`` key (default 75.0, spec rule 2.4) covers the
+  radar's 0.2 m resolution mode; it has no UI and is set by editing the
+  stored options.
 - ``CONF_ZONES`` — ``list[dict]``: ``{"zone_id", "name", "sensor", "room",
   "near_cm", "far_cm", "fallback"}``. ``sensor`` references a ``sensor_id``,
   ``room`` a ``room_id``; distances are floats in cm (spec §0, rule 2.1).
@@ -22,14 +29,20 @@ controller (a later PR) is the single reader, via :func:`.config.build_config`.
   (or the whole missing dict) fall back to the dataclass defaults in
   :func:`.config.build_config`.
 - ``CONF_BASELINES`` — ``dict[zone_id, {"move_mu", "move_sigma", "still_mu",
-  "still_sigma"}]``. Written at *runtime* by the controller when a
-  RecordBaseline window completes (spec rule 3.3: baselines persist in the
-  config entry) — never by the flows. The options flow merges its sections
-  into the stored options, so reconfiguring preserves calibration; baseline
-  keys for zones that no longer exist are simply ignored on read.
+  "still_sigma"}]``, optionally extended with ``"gates": {gate_index_str:
+  {"move_mu", "move_sigma", "still_mu", "still_sigma"}}`` (spec rule 3.6;
+  keys are strings because options are JSON). Written at *runtime* by the
+  controller when a RecordBaseline window completes (spec rule 3.3:
+  baselines persist in the config entry) — never by the flows. Baselines
+  stored without ``"gates"`` (v0.1.0) load unchanged, and zones without
+  per-gate floors are written without it. The options flow merges its
+  sections into the stored options, so reconfiguring preserves calibration;
+  baseline keys for zones that no longer exist are simply ignored on read.
 """
 
 from __future__ import annotations
+
+from .core.events import GATE_COUNT
 
 DOMAIN = "presence_conductor"
 
@@ -58,4 +71,24 @@ DISTANCE_ROLES: tuple[str, ...] = (
     ROLE_DETECTION_DISTANCE,
 )
 BINARY_ROLES: tuple[str, ...] = (ROLE_TARGET, ROLE_MOVING_TARGET, ROLE_STILL_TARGET)
+#: The manual-form roles. Gate roles are deliberately NOT included: they are
+#: discovered-only (see the options contract above).
 ALL_ROLES: tuple[str, ...] = ENERGY_ROLES + DISTANCE_ROLES + BINARY_ROLES
+
+
+def gate_move_role(index: int) -> str:
+    """Role key of one per-gate move-energy entity (spec rules 2.4-2.6)."""
+    return f"g{index}_move"
+
+
+def gate_still_role(index: int) -> str:
+    """Role key of one per-gate still-energy entity (spec rules 2.4-2.6)."""
+    return f"g{index}_still"
+
+
+GATE_MOVE_ROLES: tuple[str, ...] = tuple(gate_move_role(i) for i in range(GATE_COUNT))
+GATE_STILL_ROLES: tuple[str, ...] = tuple(gate_still_role(i) for i in range(GATE_COUNT))
+GATE_ROLES: tuple[str, ...] = GATE_MOVE_ROLES + GATE_STILL_ROLES
+
+#: Per-sensor override of the radar's distance-gate size (spec rule 2.4).
+CONF_GATE_SIZE_CM = "gate_size_cm"

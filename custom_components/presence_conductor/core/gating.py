@@ -13,7 +13,7 @@ the operator's contract. There is no cross-sensor arbitration here.
 
 from __future__ import annotations
 
-from .events import SensorFrame
+from .events import GATE_COUNT, SensorFrame
 from .model import ConductorConfig, ZoneConfig
 
 
@@ -23,6 +23,30 @@ def normalize_energy(value: float | None) -> float | None:
     if value is None:
         return None
     return min(100.0, max(0.0, value)) / 100.0
+
+
+def normalize_gates(
+    values: tuple[float | None, ...] | None,
+) -> tuple[float | None, ...] | None:
+    """Rule 1.4 for per-gate energies: unknown gates stay ``None``."""
+    if values is None:
+        return None
+    return tuple(normalize_energy(value) for value in values)
+
+
+def owned_gates(zone: ZoneConfig, gate_size_cm: float, margin_cm: float) -> tuple[int, ...]:
+    """The gate indices a zone owns (rule 2.4): every gate whose interval
+    ``[i * gate_size, (i + 1) * gate_size)`` overlaps the zone's masked
+    interval ``[near - margin, far + margin]`` (the 2.1 mask). Adjacent
+    zones may share a boundary gate — ownership is a mask, not a partition.
+    """
+    lo = zone.near_cm - margin_cm
+    hi = zone.far_cm + margin_cm
+    return tuple(
+        index
+        for index in range(GATE_COUNT)
+        if index * gate_size_cm <= hi and (index + 1) * gate_size_cm > lo
+    )
 
 
 def clamp_distance(value: float | None) -> float | None:

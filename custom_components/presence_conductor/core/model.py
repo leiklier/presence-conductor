@@ -42,12 +42,19 @@ class Health(StrEnum):
     UNKNOWN = "unknown"
 
 
+#: LD2410 gate size at the default 0.75 m range resolution (rule 2.4). The
+#: 0.2 m resolution mode makes it 20.
+DEFAULT_GATE_SIZE_CM = 75.0
+
+
 @dataclass(frozen=True, slots=True)
 class SensorConfig:
     """One physical mmWave device (§0)."""
 
     sensor_id: str
     name: str
+    #: Distance-gate size of this sensor's radar, in cm (rule 2.4).
+    gate_size_cm: float = DEFAULT_GATE_SIZE_CM
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,10 +186,16 @@ class ChannelStats:
 
 @dataclass(slots=True)
 class BaselineRecording:
-    """Samples collected during a RecordBaseline window (rule 3.3)."""
+    """Samples collected during a RecordBaseline window (rules 3.3, 3.6).
+
+    Per-gate samples are keyed by owned gate index (rule 2.4); a gate that
+    reported nothing during the window simply has no key.
+    """
 
     move_samples: list[float] = field(default_factory=list)
     still_samples: list[float] = field(default_factory=list)
+    gate_move_samples: dict[int, list[float]] = field(default_factory=dict)
+    gate_still_samples: dict[int, list[float]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -201,6 +214,12 @@ class ZoneState:
     #: and background adaptation (3.4).
     move_baseline: ChannelStats
     still_baseline: ChannelStats
+    #: Per-gate noise floors (rule 3.6), keyed by gate index. Entries are
+    #: created on demand — persisted calibration (3.3), background
+    #: adaptation (3.4) — so a gate without one scores against the
+    #: ``Tunables`` defaults and zones that never see gate data stay empty.
+    gate_move_baselines: dict[int, ChannelStats] = field(default_factory=dict)
+    gate_still_baselines: dict[int, ChannelStats] = field(default_factory=dict)
     # -- published outputs (§0) ----------------------------------------
     occupied: bool = False
     motion: bool = False
@@ -214,6 +233,11 @@ class ZoneState:
     z_still: float = 0.0
     move_gated: bool = False
     still_gated: bool = False
+    #: Whether the channel's current z came from gate evidence (rule 2.6);
+    #: the motion channel (4.4) keys off this to ignore the sensor-global
+    #: ``has_moving_target`` flag while gates say where the mover is.
+    move_from_gates: bool = False
+    still_from_gates: bool = False
     # -- activity FSM internals (rule 5) --------------------------------
     occupied_since: float | None = None
     peak_probability: float = 0.0
@@ -268,6 +292,17 @@ class EngineState:
 
 
 @dataclass(frozen=True, slots=True)
+class GateBaselines:
+    """Persisted calibration for one gate of a zone (rule 3.6), normalized
+    units."""
+
+    move_mu: float
+    move_sigma: float
+    still_mu: float
+    still_sigma: float
+
+
+@dataclass(frozen=True, slots=True)
 class ZoneBaselines:
     """Persisted calibration for one zone (rule 3.3), normalized units."""
 
@@ -275,6 +310,10 @@ class ZoneBaselines:
     move_sigma: float
     still_mu: float
     still_sigma: float
+    #: Optional per-gate floors (rule 3.6), keyed by gate index. Baselines
+    #: persisted before per-gate evidence existed simply have no gates —
+    #: the schema is backward compatible in both directions.
+    gates: Mapping[int, GateBaselines] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

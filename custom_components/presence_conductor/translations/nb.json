@@ -15,7 +15,7 @@
       },
       "manual_sensor": {
         "title": "Manuell sensor",
-        "description": "Tilordne entitetene til én mmWave-enhet til rollene sine. Energier og begge avstander er påkrevd; de binære målentitetene er valgfrie og skjerper bare estimatet.",
+        "description": "Tilordne entitetene til én mmWave-enhet til rollene sine. Energier og begge avstander er påkrevd; de binære målentitetene er valgfrie og skjerper bare estimatet. Per-gate-energientiteter (g0-g8, engineering mode) plukkes opp automatisk, men bare for oppdagede sensorer; manuelt tilordnede sensorer bruker de aggregerte energiene.",
         "data": {
           "name": "Sensornavn",
           "move_energy": "Bevegelsesenergi",
@@ -105,7 +105,7 @@
       },
       "manual_sensor": {
         "title": "Manuell sensor",
-        "description": "Tilordne entitetene til én mmWave-enhet til rollene sine. Energier og begge avstander er påkrevd; de binære målentitetene er valgfrie og skjerper bare estimatet.",
+        "description": "Tilordne entitetene til én mmWave-enhet til rollene sine. Energier og begge avstander er påkrevd; de binære målentitetene er valgfrie og skjerper bare estimatet. Per-gate-energientiteter (g0-g8, engineering mode) plukkes opp automatisk, men bare for oppdagede sensorer; manuelt tilordnede sensorer bruker de aggregerte energiene.",
         "data": {
           "name": "Sensornavn",
           "move_energy": "Bevegelsesenergi",

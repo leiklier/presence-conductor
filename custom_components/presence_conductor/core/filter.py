@@ -70,11 +70,18 @@ def on_frame(engine: ConductorEngine, frame: SensorFrame, now: float, plan: Plan
     for zone in engine.config.zones_for_sensor(frame.sensor_id):
         zst = engine.state.zones[zone.zone_id]
         # 4.2: strong gated move evidence floors the posterior immediately -
-        # not waiting for the next tick. This is the lights-on path.
+        # not waiting for the next tick. This is the lights-on path. Under
+        # gate precedence (2.6) z_move is the max owned-gate z and the gated
+        # flag is spatial, so the attack fires on whichever move z the frame
+        # produced.
         if zst.move_gated and zst.z_move >= t.z_attack:
             set_lambda(engine, zone, zst, max(zst.lam, engine.lam_attack), now, plan)  # 4.2
-        # 4.4: gated, undamped fast channel.
-        motion_evidence = zst.move_gated and (zst.z_move >= t.z_motion or frame.has_moving_target)
+        # 4.4: gated, undamped fast channel. Under gate precedence (2.6) the
+        # sensor-global has_moving_target flag is not zone evidence - the
+        # owned gates already say where the mover is.
+        motion_evidence = zst.move_gated and (
+            zst.z_move >= t.z_motion or (frame.has_moving_target and not zst.move_from_gates)
+        )
         if motion_evidence:
             zst.motion = True  # 4.4
             plan.start_timer(timers.motion_off(zone.zone_id), t.motion_hold)  # 4.4 (restart)

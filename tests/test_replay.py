@@ -126,6 +126,78 @@ def test_format_table_matches_decision_layout(tmp_path: Path) -> None:
     assert "| kontor | 2 |" in table
 
 
+def make_gated_replay_config() -> dict:
+    """The kontor config plus per-gate entities and calibrated gate floors."""
+    config = make_replay_config()
+    sensor = config["sensors"]["kontor"]
+    sensor["gates_move"] = [f"sensor.kontor_g{i}_move_energy" for i in range(9)]
+    sensor["gates_still"] = [f"sensor.kontor_g{i}_still_energy" for i in range(9)]
+    sensor["gate_size_cm"] = 75.0
+    config["baselines"]["kontor"]["gates"] = {
+        str(i): {"move_mu": 0.05, "move_sigma": 0.05, "still_mu": 0.05, "still_sigma": 0.05}
+        for i in range(9)
+    }
+    return config
+
+
+def make_gate_history() -> list[dict]:
+    """One gate-driven visit at gate 2, then an engineering-mode dropout."""
+    history = [
+        {"entity_id": "sensor.kontor_move_energy", "state": "5", "last_changed": _at(0)},
+        {"entity_id": "sensor.kontor_still_energy", "state": "5", "last_changed": _at(0)},
+    ]
+    history += [
+        {"entity_id": f"sensor.kontor_g{i}_move_energy", "state": "5", "last_changed": _at(1)}
+        for i in range(9)
+    ]
+    # t=20: strong move at gate 2 - fast attack through the gate path (2.5).
+    history.append(
+        {"entity_id": "sensor.kontor_g2_move_energy", "state": "60", "last_changed": _at(20)}
+    )
+    # t=25..80: still returns at gate 2 hold the zone.
+    for t in range(25, 81, 5):
+        history.append(
+            {"entity_id": "sensor.kontor_g2_still_energy", "state": "40", "last_changed": _at(t)}
+        )
+    # t=81: gone - the gates back at the floor.
+    history += [
+        {"entity_id": "sensor.kontor_g2_move_energy", "state": "5", "last_changed": _at(81)},
+        {"entity_id": "sensor.kontor_g2_still_energy", "state": "5", "last_changed": _at(81)},
+    ]
+    # t=120: engineering mode drops - every gate reads unavailable. Gates go
+    # None (per-frame fallback, rule 2.6) with no availability flap (1.3).
+    history += [
+        {
+            "entity_id": f"sensor.kontor_g{i}_move_energy",
+            "state": "unavailable",
+            "last_changed": _at(120),
+        }
+        for i in range(9)
+    ]
+    # Quiet tail so the OFF interval closes long after the visit.
+    history.append(
+        {"entity_id": "sensor.kontor_move_energy", "state": "4", "last_changed": _at(310)}
+    )
+    return history
+
+
+def test_replay_consumes_gate_history(tmp_path: Path) -> None:
+    """Rules 2.4-2.6/3.6 through the replay harness: gate entities drive the
+    visit and the engineering-mode dropout causes no extra transitions."""
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(make_gated_replay_config()))
+    config, entity_map, baselines = replay_mod.load_config(config_path)
+    assert config.sensors[0].gate_size_cm == 75.0
+    assert entity_map["sensor.kontor_g2_move_energy"] == ("kontor", "gate_move:2")
+
+    traces = replay_mod.replay(config, entity_map, make_gate_history(), baselines)
+    trace = traces["kontor"]
+    assert trace.transitions == 2  # one clean gate-driven visit, nothing else
+    assert len(trace.on_durations) == 1
+    assert 55 <= trace.on_durations[0] <= 130  # visit + decay tail
+    assert all(d >= 15 for d in trace.off_durations)  # dropout added no flaps
+
+
 def test_main_prints_table(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "config.json"
     history_path = tmp_path / "history.json"

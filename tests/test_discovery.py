@@ -25,6 +25,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.presence_conductor import discovery
 from custom_components.presence_conductor.const import (
     ALL_ROLES,
+    GATE_ROLES,
     ROLE_DETECTION_DISTANCE,
     ROLE_MOVE_ENERGY,
     ROLE_STILL_ENERGY,
@@ -207,3 +208,44 @@ async def test_area_names(hass: HomeAssistant) -> None:
     """Sorted area names feed the room-name suggestions."""
     await build_installation(hass)
     assert discovery.area_names(hass) == ["Kjøkken", "Kontor", "Sofakrok", "Spisebord"]
+
+
+GATED_PREFIX = "apollo_msr_2_gates"
+
+
+async def stage_gated_device(hass: HomeAssistant) -> str:
+    """A full cluster plus the 18 engineering-mode per-gate energy entities."""
+    dev_reg = dr.async_get(hass)
+    ent_reg = er.async_get(hass)
+    esphome = MockConfigEntry(domain="esphome")
+    esphome.add_to_hass(hass)
+    device = dev_reg.async_get_or_create(
+        config_entry_id=esphome.entry_id,
+        identifiers={("esphome", "gates")},
+        name="Apollo MSR-2 Gates",
+    )
+    for role in ALL_ROLES + GATE_ROLES:
+        domain, suffix = ROLE_TO_SUFFIX[role]
+        ent_reg.async_get_or_create(
+            domain,
+            "esphome",
+            f"gates{suffix}",
+            suggested_object_id=f"{GATED_PREFIX}{suffix}",
+            device_id=device.id,
+        )
+    return device.id
+
+
+async def test_gate_entities_ride_along(hass: HomeAssistant) -> None:
+    """Spec 2.4-2.6: the 18 per-gate energy suffixes map to gate roles.
+
+    The four ``build_installation`` devices carry no gate entities and still
+    qualify (see the tests above): gates are optional enrichment (spec 8.1).
+    """
+    await stage_gated_device(hass)
+    sensors = discovery.discover_sensors(hass)
+
+    assert [sensor.name for sensor in sensors] == ["Apollo MSR-2 Gates"]
+    assert sensors[0].entities == cluster_entities(GATED_PREFIX, ALL_ROLES + GATE_ROLES)
+    assert sensors[0].entities["g0_move"] == f"sensor.{GATED_PREFIX}_g0_move_energy"
+    assert sensors[0].entities["g8_still"] == f"sensor.{GATED_PREFIX}_g8_still_energy"

@@ -37,10 +37,16 @@ full output set even though they fuse into one room.
 
 - **1.1 Frame.** The adapter coalesces a sensor's entity states into
   `SensorFrame(sensor_id, moving_distance_cm, still_distance_cm, move_energy,
-  still_energy, has_target, has_moving_target, has_still_target)` and submits
-  it whenever any underlying entity changes. Distances are `None` when the
-  device reports no target of that kind. Energies are 0–100, `None` when
-  unknown.
+  still_energy, has_target, has_moving_target, has_still_target, gate_move,
+  gate_still)` and submits it whenever any underlying entity changes.
+  Distances are `None` when the device reports no target of that kind.
+  Energies are 0–100, `None` when unknown. `gate_move`/`gate_still` carry the
+  per-gate energies of engineering mode (2.4–2.6): nine elements — one per
+  LD2410 distance gate `g0..g8` — with `None` for gates the device does not
+  currently report; the whole tuple is `None` when the sensor has no gate
+  entities configured. The adapter fills them only when gate entities are
+  configured and parseable; engineering mode dropping (it does not survive a
+  radar power-cycle) blanks gates without touching availability (1.3).
 - **1.2 Tick.** The adapter delivers a periodic `Tick` (default every 1.0 s).
   All time-driven behavior (decay, dwell, holds) advances on ticks and event
   timestamps; the core never reads a clock.
@@ -49,8 +55,9 @@ full output set even though they fuse into one room.
   entities become unavailable, its zones enter `UNKNOWN` health: outputs hold
   their last state, `probability` is marked stale, and room fusion ignores
   the zone (6.3). Recovery is immediate on the next frame.
-- **1.4 Unit hygiene.** Energies are normalized to [0, 1] on ingest.
-  Distances stay in cm. Out-of-range values are clamped, never rejected.
+- **1.4 Unit hygiene.** Energies — aggregate and per-gate — are normalized
+  to [0, 1] on ingest. Distances stay in cm. Out-of-range values are
+  clamped, never rejected.
 
 ## 2. Distance gating
 
@@ -70,6 +77,33 @@ full output set even though they fuse into one room.
   `None`, the evidence is attributed to the sensor's *default zone* (the zone
   flagged `fallback: true`, else the nearest zone). This keeps single-zone
   sensors working when the device momentarily omits distance.
+- **2.4 Gate ownership.** The radar divides its beam into nine distance
+  gates, gate `i` spanning `[i · gate_size, (i + 1) · gate_size)` cm from
+  the sensor. `gate_size` is per-sensor configuration (`gate_size_cm`,
+  default 75 — the 0.75 m range resolution; the 0.2 m mode makes it 20). A
+  zone owns every gate whose interval overlaps its masked interval
+  `[near_cm − margin, far_cm + margin]` (the same margin as 2.1). Adjacent
+  zones of one sensor may share a boundary gate: ownership is a mask, not a
+  partition. A zone whose masked interval lies beyond the last gate owns
+  nothing and runs on the aggregate path alone (2.6).
+- **2.5 Gate evidence.** Per owned gate and per channel, `z_i` is the capped
+  z-score of that gate's energy against that gate's own noise floor (3.6),
+  in the form of 3.2. The zone's channel evidence is the **maximum** over
+  its owned gates, not the sum: a person occupies one or two gates, and
+  summing would dilute a strong local return with the noise of empty gates.
+  The max also credits two simultaneous people in different zones of one
+  sensor — impossible in the single-distance model (2.1).
+- **2.6 Gate precedence.** When a frame's gate data covers a zone's channel
+  — the gate tuple is present and at least one owned gate reports a value —
+  gate evidence (2.5) replaces the aggregate energy + distance path
+  (2.1–2.3) for that channel of that frame: spatially it is strictly
+  better. When it does not (engineering mode off, no gate entities, all
+  owned gates unknown, or no owned gates), the aggregate path applies
+  unchanged. The fallback is automatic and per frame and per channel; there
+  is no mode latch. Fast attack (4.2) fires on whichever move z the frame
+  produced. The motion channel (4.4) keys on the gate move z while gate
+  evidence is in effect; the sensor-global `has_moving_target` flag is not
+  zone evidence when the gates already say where the mover is.
 
 ## 3. Evidence model and calibration
 
@@ -99,6 +133,19 @@ full output set even though they fuse into one room.
   binary output loses a still person whose energy sits *under* the gate
   threshold; rule 3.2 still credits that margin as evidence. This is the
   mechanism that bridges the measured dropout gaps.
+- **3.6 Per-gate noise floors.** Per zone, per owned gate (2.4) and per
+  channel, calibration maintains a `(mu, sigma)` floor — spatial background
+  subtraction: a fan or appliance elevating one gate gets its own floor
+  there and stops polluting the whole zone. `RecordBaseline` (3.3) collects
+  per-gate samples alongside the aggregates and replaces the floor of every
+  gate that produced samples; gates that reported nothing keep their
+  previous floor. Background adaptation (3.4) extends per gate under the
+  same eligibility, clock and freeze conditions. A gate without a recorded
+  or adapted floor scores against the `default_mu`/`default_sigma`
+  tunables. Persisted per-zone baselines gain an optional `gates` mapping
+  (gate index → per-channel `(mu, sigma)`); baselines stored without it
+  load unchanged, and zones without per-gate floors persist without it —
+  the schema is backward compatible in both directions.
 
 ## 4. Occupancy filter
 
@@ -184,11 +231,19 @@ A per-zone FSM driven by the posterior and channel dominance:
 
 ## 8. Non-goals (v1) and roadmap
 
-- **8.1** Per-gate energies (`g0..g8`, engineering mode) are *not* consumed in
-  v1. The frame model reserves optional fields; a phase-2 PR adds per-gate
-  noise floors (spatial background subtraction) behind a capability flag,
-  together with the ESPHome data-enablement overlay (engineering-mode
-  re-assert, filter tuning, recorder-exclusion guidance).
+- **8.1** Per-gate energies (`g0..g8`, engineering mode) are consumed since
+  phase 2: gate ownership (2.4), max-aggregated gate evidence (2.5),
+  per-frame precedence over the aggregate path (2.6) and per-gate noise
+  floors with backward-compatible persistence (3.6). There is no capability
+  flag: gate consumption is implied by a sensor's configured gate entities,
+  and the engine degrades to the aggregate path per frame whenever
+  engineering mode drops (it does not survive a radar power-cycle; the
+  ESPHome overlay re-asserts it within about a minute). The data-enablement
+  overlay itself — engineering-mode re-assert, per-sensor filter tuning,
+  recorder-exclusion guidance for the 18 gate entities — lives with the
+  device configs (`homeassistant-bjaalands/esphome/*.yaml`), not in this
+  repo. Still out of scope here: writing gate thresholds or using gate data
+  for auto-threshold suggestions (8.2).
 - **8.2** No writes to device configuration (gate thresholds, radar
   timeout) in v1. A later calibration assistant may *suggest* thresholds;
   writing them stays a manual, operator-approved step.
