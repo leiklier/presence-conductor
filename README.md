@@ -8,13 +8,15 @@ with binary per-gate thresholds inside the module. The result flaps: a still
 person drops out for seconds at a time, drafts and fans ghost in, and every
 downstream automation compensates with fixed delays. This integration
 consumes the radar's *energy and distance* streams instead of its binary
-verdicts and runs a calibrated Bayesian filter over them. Rooms and the home
-are the consumer surface — one Home Assistant device per room, plus a hub —
+verdicts and runs a calibrated anomaly-score filter over them (scores are
+centered against each zone's measured empty-room distribution, so sensor
+noise can never accumulate into occupancy). Rooms and the home are the
+consumer surface — one Home Assistant device per room, plus a hub —
 publishing signals automations can actually use:
 
 - **one device per room** — each room's full presence surface on one device:
   occupancy, motion, activity, settled, pass-by events and a live
-  probability, fused from every zone (of any sensor) covering the room, with
+  confidence, fused from every zone (of any sensor) covering the room, with
   distance cutoffs so sensors don't claim each other's areas
 - **occupancy** — robust "someone is in the room", bridging dropouts and
   suppressing ghosts, with no fixed timeouts
@@ -25,7 +27,7 @@ publishing signals automations can actually use:
 - **anyone-home** — an apartment-wide presence estimate with a slow memory,
   for automations that only need to know whether anybody is around
 - **zone-level diagnostics** — the per-zone estimator outputs behind every
-  room (occupancy, motion, activity, probability, dwell, pass-by) live on
+  room (occupancy, motion, activity, confidence, dwell, pass-by) live on
   the room's device but ship disabled; enable individual entities when
   debugging the estimate or when an automation wants one specific distance
   slice. Each zone's record-baseline button stays enabled — calibration is
