@@ -13,6 +13,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+#: Number of LD2410 distance gates (``g0..g8``, rules 1.1, 2.4). Fixed by
+#: the radar in both resolution modes; the resolution changes the gate
+#: *size* (``SensorConfig.gate_size_cm``), never the count.
+GATE_COUNT = 9
+
 
 @dataclass(frozen=True, slots=True)
 class Event:
@@ -36,10 +41,12 @@ class SensorFrame(Event):
     has_target: bool = False
     has_moving_target: bool = False
     has_still_target: bool = False
-    #: Reserved for phase 2 (rule 8.1): per-gate energies from engineering
-    #: mode. Not consumed by the v1 estimator.
-    gate_move_energies: tuple[float, ...] | None = None
-    gate_still_energies: tuple[float, ...] | None = None
+    #: Per-gate energies from engineering mode (rule 1.1), consumed by rules
+    #: 2.4-2.6: ``GATE_COUNT`` elements when present, raw 0-100, individual
+    #: gates ``None`` when unknown. The whole tuple is ``None`` when the
+    #: sensor has no gate entities configured or has never reported them.
+    gate_move: tuple[float | None, ...] | None = None
+    gate_still: tuple[float | None, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)

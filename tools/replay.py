@@ -23,7 +23,10 @@ entities), each item shaped ``{"entity_id": ..., "state": ...,
           "move_energy": "sensor.kontor_msr2_move_energy",
           "still_energy": "sensor.kontor_msr2_still_energy",
           "has_moving_target": "binary_sensor.kontor_msr2_moving_target",
-          "has_still_target": "binary_sensor.kontor_msr2_still_target"
+          "has_still_target": "binary_sensor.kontor_msr2_still_target",
+          "gates_move": ["sensor.kontor_msr2_g0_move_energy", "..."],
+          "gates_still": ["sensor.kontor_msr2_g0_still_energy", "..."],
+          "gate_size_cm": 75.0
         }
       },
       "zones": [
@@ -32,17 +35,24 @@ entities), each item shaped ``{"entity_id": ..., "state": ...,
       ],
       "baselines": {
         "kontor": {"move_mu": 0.05, "move_sigma": 0.05,
-                   "still_mu": 0.05, "still_sigma": 0.05}
+                   "still_mu": 0.05, "still_sigma": 0.05,
+                   "gates": {"2": {"move_mu": 0.05, "move_sigma": 0.05,
+                                   "still_mu": 0.05, "still_sigma": 0.05}}}
       },
       "tunables": {"tau_decay": 90}
     }
 
-``baselines`` and ``tunables`` are optional. Distance entities are treated
+``baselines``, ``tunables`` and the gate keys are optional. ``gates_move``/
+``gates_still`` list per-gate energy entities by gate index (spec rules
+2.4-2.6); ``gate_size_cm`` (default 75.0, rule 2.4) and per-zone baseline
+``"gates"`` floors (rule 3.6) ride along. Distance entities are treated
 as ``None`` (rule 1.1) while the matching ``has_*_target`` binary is off,
 mirroring the adapter's frame contract; an ``unavailable``/``unknown``
-state on any of a sensor's entities marks the sensor unavailable until the
-next parseable update. Ticks are synthesized every ``tick_interval``
-between recorded changes, and engine timers fire at their deadlines.
+state on any of a sensor's aggregate entities marks the sensor unavailable
+until the next parseable update, while an unknown *gate* entity only blanks
+that gate — engineering mode dropping is normal, not sensor failure (rule
+2.6). Ticks are synthesized every ``tick_interval`` between recorded
+changes, and engine timers fire at their deadlines.
 
 Pure Python: imports only the core package and the standard library.
 """
@@ -76,12 +86,15 @@ for _name, _path in (
 
 from custom_components.presence_conductor.core.engine import ConductorEngine  # noqa: E402
 from custom_components.presence_conductor.core.events import (  # noqa: E402
+    GATE_COUNT,
     SensorAvailability,
     SensorFrame,
     Tick,
 )
 from custom_components.presence_conductor.core.model import (  # noqa: E402
+    DEFAULT_GATE_SIZE_CM,
     ConductorConfig,
+    GateBaselines,
     InitialSnapshot,
     RoomConfig,
     SensorConfig,
@@ -100,6 +113,9 @@ FRAME_ROLES = (
     "has_still_target",
 )
 
+#: Internal role prefix for per-gate entities: ``gate_move:3`` etc.
+_GATE_ROLE_PREFIX = "gate_"
+
 
 # ---------------------------------------------------------------------
 # Config / history loading
@@ -109,7 +125,14 @@ FRAME_ROLES = (
 def load_config(path: str | Path) -> tuple[ConductorConfig, dict[str, tuple[str, str]], dict]:
     """Returns (core config, entity_id -> (sensor_id, role), raw baselines)."""
     raw = json.loads(Path(path).read_text())
-    sensors = tuple(SensorConfig(sensor_id, sensor_id) for sensor_id in raw["sensors"])
+    sensors = tuple(
+        SensorConfig(
+            sensor_id,
+            sensor_id,
+            gate_size_cm=float(roles.get("gate_size_cm", DEFAULT_GATE_SIZE_CM)),  # 2.4
+        )
+        for sensor_id, roles in raw["sensors"].items()
+    )
     zones = tuple(
         ZoneConfig(
             zone_id=z["zone_id"],
@@ -135,6 +158,10 @@ def load_config(path: str | Path) -> tuple[ConductorConfig, dict[str, tuple[str,
         for role, entity_id in roles.items():
             if role in FRAME_ROLES:
                 entity_map[entity_id] = (sensor_id, role)
+        # Per-gate energy entities, listed by gate index (rules 2.4-2.6).
+        for channel in ("move", "still"):
+            for index, entity_id in enumerate(roles.get(f"gates_{channel}") or []):
+                entity_map[entity_id] = (sensor_id, f"{_GATE_ROLE_PREFIX}{channel}:{index}")
     return config, entity_map, raw.get("baselines", {})
 
 
@@ -195,7 +222,19 @@ class _SensorShadow:
 
     def __init__(self) -> None:
         self.values: dict[str, float | bool | None] = dict.fromkeys(FRAME_ROLES)
+        #: Per-gate values by channel; a channel stays ``None`` until its
+        #: first recorded gate update, mirroring the adapter's "configured
+        #: and reported" contract (rule 1.1).
+        self.gates: dict[str, list[float | None] | None] = {"move": None, "still": None}
         self.available = True
+
+    def set_gate(self, role: str, value: float | None) -> None:
+        """Fold one per-gate update (``gate_move:3``) into the shadow."""
+        channel, index = role.removeprefix(_GATE_ROLE_PREFIX).split(":")
+        values = self.gates[channel]
+        if values is None:
+            values = self.gates[channel] = [None] * GATE_COUNT
+        values[int(index)] = value
 
     def frame(self, sensor_id: str) -> SensorFrame:
         v = self.values
@@ -213,6 +252,8 @@ class _SensorShadow:
                 return None
             return float(distance)
 
+        gate_move = self.gates["move"]
+        gate_still = self.gates["still"]
         return SensorFrame(
             sensor_id=sensor_id,
             moving_distance_cm=_distance("moving_distance", "has_moving_target"),
@@ -224,6 +265,8 @@ class _SensorShadow:
             or _flag("has_still_target"),
             has_moving_target=_flag("has_moving_target"),
             has_still_target=_flag("has_still_target"),
+            gate_move=None if gate_move is None else tuple(gate_move),
+            gate_still=None if gate_still is None else tuple(gate_still),
         )
 
 
@@ -251,6 +294,17 @@ def replay(
                 move_sigma=b["move_sigma"],
                 still_mu=b["still_mu"],
                 still_sigma=b["still_sigma"],
+                # Rule 3.6: optional per-gate floors, keyed like the config
+                # entry (string indices, JSON).
+                gates={
+                    int(index): GateBaselines(
+                        move_mu=g["move_mu"],
+                        move_sigma=g["move_sigma"],
+                        still_mu=g["still_mu"],
+                        still_sigma=g["still_sigma"],
+                    )
+                    for index, g in (b.get("gates") or {}).items()
+                },
             )
             for zone_id, b in (baselines or {}).items()
         }
@@ -306,6 +360,16 @@ def replay(
         sensor_id, role = entity_map[entity_id]
         shadow = shadows[sensor_id]
         parseable, value = _parse_state(role, state)
+        if role.startswith(_GATE_ROLE_PREFIX):
+            # An unknown gate is normal (engineering mode off): the gate
+            # goes None and sensor availability is untouched — rule 1.3
+            # stays keyed to the aggregate entities; the engine falls back
+            # to the aggregate path per frame (rule 2.6).
+            shadow.set_gate(role, float(value) if parseable else None)
+            if shadow.available:
+                absorb(engine.submit(shadow.frame(sensor_id), now))
+                observe()
+            continue
         if not parseable:
             shadow.values[role] = None
             if shadow.available:

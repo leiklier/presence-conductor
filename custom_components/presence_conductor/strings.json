@@ -15,7 +15,7 @@
       },
       "manual_sensor": {
         "title": "Manual sensor",
-        "description": "Assign the entities of one mmWave device to their roles. Energies and both distances are required; the binary target entities are optional and only sharpen the estimate.",
+        "description": "Assign the entities of one mmWave device to their roles. Energies and both distances are required; the binary target entities are optional and only sharpen the estimate. Per-gate energy entities (g0-g8, engineering mode) are picked up automatically for discovered sensors only; manually assigned sensors run on the aggregate energies.",
         "data": {
           "name": "Sensor name",
           "move_energy": "Move energy",
@@ -105,7 +105,7 @@
       },
       "manual_sensor": {
         "title": "Manual sensor",
-        "description": "Assign the entities of one mmWave device to their roles. Energies and both distances are required; the binary target entities are optional and only sharpen the estimate.",
+        "description": "Assign the entities of one mmWave device to their roles. Energies and both distances are required; the binary target entities are optional and only sharpen the estimate. Per-gate energy entities (g0-g8, engineering mode) are picked up automatically for discovered sensors only; manually assigned sensors run on the aggregate energies.",
         "data": {
           "name": "Sensor name",
           "move_energy": "Move energy",

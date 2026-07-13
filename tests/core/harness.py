@@ -20,9 +20,10 @@ raw     z  meaning with default tunables
 from __future__ import annotations
 
 from custom_components.presence_conductor.core.engine import ConductorEngine
-from custom_components.presence_conductor.core.events import Event, SensorFrame, Tick
+from custom_components.presence_conductor.core.events import GATE_COUNT, Event, SensorFrame, Tick
 from custom_components.presence_conductor.core.model import (
     ConductorConfig,
+    GateBaselines,
     InitialSnapshot,
     RoomConfig,
     RoomState,
@@ -80,13 +81,38 @@ def make_snapshot(
     enabled: bool = True,
     mu: float = MU,
     sigma: float = SIGMA,
+    gate_floors: dict[str, dict[int, GateBaselines]] | None = None,
 ) -> InitialSnapshot:
     return InitialSnapshot(
         frames=frames or {},
         available=available or {},
-        baselines={z.zone_id: ZoneBaselines(mu, sigma, mu, sigma) for z in config.zones},
+        baselines={
+            z.zone_id: ZoneBaselines(
+                mu, sigma, mu, sigma, gates=(gate_floors or {}).get(z.zone_id, {})
+            )
+            for z in config.zones
+        },
         enabled=enabled,
     )
+
+
+def calibrated_gate_floors(
+    config: ConductorConfig, *, mu: float = MU, sigma: float = SIGMA
+) -> dict[str, dict[int, GateBaselines]]:
+    """Every gate of every zone calibrated like the aggregates (3.6), so the
+    raw-energy-to-z table above applies to gate energies too."""
+    gates = {index: GateBaselines(mu, sigma, mu, sigma) for index in range(GATE_COUNT)}
+    return {zone.zone_id: gates for zone in config.zones}
+
+
+def gate_tuple(
+    peaks: dict[int, float | None] | None = None, *, fill: float | None = 100 * MU
+) -> tuple[float | None, ...]:
+    """A 9-gate raw-energy tuple: ``fill`` everywhere except the ``peaks``."""
+    values: list[float | None] = [fill] * GATE_COUNT
+    for index, value in (peaks or {}).items():
+        values[index] = value
+    return tuple(values)
 
 
 def frame(
@@ -98,6 +124,8 @@ def frame(
     still_e: float | None = None,
     moving: bool = False,
     still: bool = False,
+    gate_move: tuple[float | None, ...] | None = None,
+    gate_still: tuple[float | None, ...] | None = None,
 ) -> SensorFrame:
     """A coalesced frame (rule 1.1). Energies are raw 0-100."""
     return SensorFrame(
@@ -109,6 +137,8 @@ def frame(
         has_target=moving or still,
         has_moving_target=moving,
         has_still_target=still,
+        gate_move=gate_move,
+        gate_still=gate_still,
     )
 
 
@@ -234,6 +264,8 @@ class Harness:
                 z.move_baseline.sigma,
                 z.still_baseline.mu,
                 z.still_baseline.sigma,
+                tuple(sorted((i, g.mu, g.sigma) for i, g in z.gate_move_baselines.items())),
+                tuple(sorted((i, g.mu, g.sigma) for i, g in z.gate_still_baselines.items())),
             )
             for zone_id, z in s.zones.items()
         )

@@ -20,12 +20,13 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
-from custom_components.presence_conductor.const import DOMAIN
+from custom_components.presence_conductor.const import DOMAIN, GATE_COUNT
 from custom_components.presence_conductor.core.events import (
     SensorAvailability,
     SensorFrame,
     Tick,
 )
+from custom_components.presence_conductor.core.model import ChannelStats, GateBaselines
 from custom_components.presence_conductor.core.plan import PassBy
 from tests.fake_engine import FakeEngine
 
@@ -277,6 +278,92 @@ async def test_unknown_state_counts_as_unavailable(hass: HomeAssistant, monkeypa
 
 
 # ---------------------------------------------------------------------------
+# per-gate entities (rules 2.4-2.6)
+# ---------------------------------------------------------------------------
+
+GATED = "gated_radar"
+GATED_ENTITIES = {
+    "move_energy": "sensor.gated_move_energy",
+    "still_energy": "sensor.gated_still_energy",
+    "moving_distance": "sensor.gated_moving_distance",
+    "still_distance": "sensor.gated_still_distance",
+    **{f"g{i}_move": f"sensor.gated_g{i}_move_energy" for i in range(GATE_COUNT)},
+    **{f"g{i}_still": f"sensor.gated_g{i}_still_energy" for i in range(GATE_COUNT)},
+}
+GATED_OPTIONS: dict[str, Any] = {
+    "sensors": [{"sensor_id": GATED, "name": "Gated radar", "entities": GATED_ENTITIES}],
+    "zones": [
+        {
+            "zone_id": "gated_zone",
+            "name": "Gated zone",
+            "sensor": GATED,
+            "room": "stue",
+            "near_cm": 0.0,
+            "far_cm": 300.0,
+            "fallback": True,
+        }
+    ],
+    "rooms": [{"room_id": "stue", "name": "Stue"}],
+}
+
+
+def seed_gated_world(hass: HomeAssistant) -> None:
+    for role, entity_id in GATED_ENTITIES.items():
+        if role.startswith("g"):
+            hass.states.async_set(entity_id, "3.0")
+        elif "energy" in role:
+            hass.states.async_set(entity_id, "2.0")
+        else:
+            hass.states.async_set(entity_id, "0.0")
+
+
+async def test_gate_entities_feed_the_frame(hass: HomeAssistant, monkeypatch) -> None:
+    """Configured gate entities ride along in the snapshot and every frame."""
+    seed_gated_world(hass)
+    _, _controller, fake = await setup_conductor(
+        hass, monkeypatch, options=GATED_OPTIONS, seed=False
+    )
+    snapshot_frame = fake.snapshot.frames[GATED]
+    assert snapshot_frame.gate_move == (3.0,) * GATE_COUNT  # 7.1 seeding
+    assert snapshot_frame.gate_still == (3.0,) * GATE_COUNT
+
+    hass.states.async_set(GATED_ENTITIES["g3_move"], "42.5")
+    await hass.async_block_till_done()
+    frame = fake.events_of(SensorFrame)[-1]
+    assert frame.gate_move == (3.0, 3.0, 3.0, 42.5, 3.0, 3.0, 3.0, 3.0, 3.0)
+    assert frame.gate_still == (3.0,) * GATE_COUNT
+    assert frame.move_energy == 2.0  # aggregates unchanged
+
+
+async def test_unknown_gate_is_none_without_availability_impact(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    """Engineering mode off: unknown gates go None per gate, while sensor
+    availability stays keyed to the aggregate energy roles (rule 1.3)."""
+    seed_gated_world(hass)
+    _, _controller, fake = await setup_conductor(
+        hass, monkeypatch, options=GATED_OPTIONS, seed=False
+    )
+    hass.states.async_set(GATED_ENTITIES["g0_move"], "unknown")
+    await hass.async_block_till_done()
+    frame = fake.events_of(SensorFrame)[-1]
+    assert frame.gate_move[0] is None
+    assert frame.gate_move[1] == 3.0
+    assert fake.events_of(SensorAvailability) == []  # gates are not required
+
+
+async def test_sensor_without_gate_entities_carries_no_gate_tuples(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    _, _controller, fake = await setup_conductor(hass, monkeypatch)
+    hass.states.async_set(KONTOR_ENTITIES["move_energy"], "42.5")
+    await hass.async_block_till_done()
+    frame = fake.events_of(SensorFrame)[-1]
+    assert frame.gate_move is None
+    assert frame.gate_still is None
+
+
+# ---------------------------------------------------------------------------
 # tick cadence (rule 1.2)
 # ---------------------------------------------------------------------------
 
@@ -375,6 +462,44 @@ async def test_persist_calibration_writes_options_without_reload(
     # The baselines-only write must not reload the entry (no loop).
     assert hass.data[DOMAIN][entry.entry_id] is controller
     assert len(fake.start_calls) == 1
+
+
+async def test_persist_calibration_includes_gate_floors(hass: HomeAssistant, monkeypatch) -> None:
+    """Rule 3.6: per-gate floors persist under "gates" (string keys, JSON);
+    zones without any keep the v0.1.0 schema exactly."""
+    entry, controller, fake = await setup_conductor(hass, monkeypatch)
+
+    zst = fake.state.zones["kontor_pult"]
+    zst.gate_move_baselines[2] = ChannelStats(0.011, 0.021)
+    zst.gate_still_baselines[2] = ChannelStats(0.012, 0.022)
+    zst.gate_move_baselines[3] = ChannelStats(0.013, 0.023)  # move-only gate
+    fake.script(fake.plan(persist=True))
+    controller.submit(Tick())
+    await hass.async_block_till_done()
+
+    stored = entry.options["baselines"]["kontor_pult"]
+    assert stored["gates"] == {
+        # The gate seen on one channel only persists the Tunables defaults
+        # for the other - what the engine would score with anyway.
+        "2": {"move_mu": 0.011, "move_sigma": 0.021, "still_mu": 0.012, "still_sigma": 0.022},
+        "3": {"move_mu": 0.013, "move_sigma": 0.023, "still_mu": 0.1, "still_sigma": 0.1},
+    }
+    assert "gates" not in entry.options["baselines"]["kontor_dor"]  # v0.1.0 schema
+
+
+async def test_baselines_with_gates_round_trip_into_the_snapshot(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    """Stored "gates" floors reach the engine through the snapshot (3.6)."""
+    gate_floor = {"move_mu": 0.01, "move_sigma": 0.02, "still_mu": 0.03, "still_sigma": 0.04}
+    options = {
+        **OPTIONS,
+        "baselines": {"sofakrok": {**OPTIONS["baselines"]["sofakrok"], "gates": {"1": gate_floor}}},
+    }
+    _, _controller, fake = await setup_conductor(hass, monkeypatch, options=options)
+    assert fake.snapshot.baselines["sofakrok"].gates == {
+        1: GateBaselines(move_mu=0.01, move_sigma=0.02, still_mu=0.03, still_sigma=0.04)
+    }
 
 
 async def test_persist_preserves_stale_zone_keys(hass: HomeAssistant, monkeypatch) -> None:

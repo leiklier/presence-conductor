@@ -26,7 +26,7 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
-from custom_components.presence_conductor.const import DOMAIN
+from custom_components.presence_conductor.const import ALL_ROLES, DOMAIN, GATE_ROLES
 from custom_components.presence_conductor.controller import EVENT_PASS_BY
 from tests.test_discovery import (
     KJOKKEN_PREFIX,
@@ -143,10 +143,18 @@ def seed_world(hass: HomeAssistant, overrides: dict[str, str] | None = None) -> 
         hass.states.async_set(entity_id, value)
 
 
-async def setup_e2e(hass: HomeAssistant, overrides: dict[str, str] | None = None):
+async def setup_e2e(
+    hass: HomeAssistant,
+    overrides: dict[str, str] | None = None,
+    options: dict[str, Any] | None = None,
+):
     seed_world(hass, overrides)
     entry = MockConfigEntry(
-        domain=DOMAIN, title="Presence Conductor", unique_id=DOMAIN, data={}, options=OPTIONS
+        domain=DOMAIN,
+        title="Presence Conductor",
+        unique_id=DOMAIN,
+        data={},
+        options=options or OPTIONS,
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
@@ -392,6 +400,87 @@ async def test_disable_freezes_outputs_and_swallows_events(hass: HomeAssistant, 
         await advance(hass, freezer, 1.0)
     assert len(captured) == 1
     assert captured[0].data["zone_id"] == "sofakrok"
+
+
+GATED_PREFIX = "apollo_msr_2_gates"
+GATED_CLUSTER = cluster_entities(GATED_PREFIX, ALL_ROLES + GATE_ROLES)
+GATED_OPTIONS: dict[str, Any] = {
+    "sensors": [
+        {"sensor_id": "apollo_gates", "name": "Apollo MSR-2 Gates", "entities": GATED_CLUSTER}
+    ],
+    "zones": [
+        {
+            "zone_id": "gates_near",
+            "name": "Gates near",
+            "sensor": "apollo_gates",
+            "room": "gates",
+            "near_cm": 0.0,
+            "far_cm": 150.0,
+            "fallback": True,
+        },
+        {
+            "zone_id": "gates_far",
+            "name": "Gates far",
+            "sensor": "apollo_gates",
+            "room": "gates",
+            "near_cm": 220.0,
+            "far_cm": 300.0,
+            "fallback": False,
+        },
+    ],
+    "rooms": [{"room_id": "gates", "name": "Gates"}],
+    "baselines": {
+        zone_id: {**TIGHT_BASELINE, "gates": {str(i): dict(TIGHT_BASELINE) for i in range(9)}}
+        for zone_id in ("gates_near", "gates_far")
+    },
+}
+
+
+def seed_gated_world(hass: HomeAssistant) -> None:
+    """Idle states for the gated cluster (gate energies at the tight floor)."""
+    for role, entity_id in GATED_CLUSTER.items():
+        if entity_id.startswith("binary_sensor."):
+            hass.states.async_set(entity_id, "off")
+        elif role.startswith("g") or "energy" in role:
+            hass.states.async_set(entity_id, "2.0")
+        else:
+            hass.states.async_set(entity_id, "0.0")
+
+
+async def test_gate_evidence_end_to_end(hass: HomeAssistant) -> None:
+    """Spec 2.4-2.6 through the real seam: gate entities drive occupancy
+    spatially, and an engineering-mode dropout falls back per frame."""
+    seed_gated_world(hass)
+    _entry, _controller = await setup_e2e(hass, options=GATED_OPTIONS)
+    occ_near = "binary_sensor.presence_conductor_gates_near_occupancy"
+    occ_far = "binary_sensor.presence_conductor_gates_far_occupancy"
+    assert hass.states.get(occ_near).state == "off"
+    assert hass.states.get(occ_far).state == "off"
+
+    # Strong move at gate 3 ([225, 300) cm): only the far zone owns it
+    # (2.4), so only the far zone reacts - even though the aggregate
+    # distance points squarely at the near zone. Gate precedence (2.6).
+    await set_states(
+        hass,
+        {
+            GATED_CLUSTER["g3_move"]: "80.0",
+            GATED_CLUSTER["move_energy"]: "80.0",
+            GATED_CLUSTER["moving_distance"]: "100.0",
+            GATED_CLUSTER["moving_target"]: "on",
+        },
+    )
+    assert hass.states.get(occ_far).state == "on"  # 2.5 + 4.2
+    assert hass.states.get(occ_near).state == "off"  # aggregate path ignored
+
+    # Engineering mode drops: every gate reads unknown. The very next frame
+    # runs the aggregate path (2.6), which credits the near zone at 100 cm -
+    # and nothing goes unavailable (1.3 keys on the aggregate energies).
+    await set_states(
+        hass,
+        {GATED_CLUSTER[role]: "unknown" for role in GATE_ROLES},
+    )
+    assert hass.states.get(occ_near).state == "on"  # fallback, per frame
+    assert hass.states.get(occ_far).state != "unavailable"
 
 
 async def test_full_entity_inventory(hass: HomeAssistant) -> None:

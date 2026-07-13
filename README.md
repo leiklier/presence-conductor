@@ -22,6 +22,11 @@ automations can actually use:
   cutoffs so they don't claim each other's areas
 - **anyone-home** — an apartment-wide presence estimate with a slow memory,
   for automations that only need to know whether anybody is around
+- **per-gate spatial evidence** — when the radar's engineering mode streams
+  per-gate energies, zones are scored gate-by-gate against per-gate noise
+  floors (a fan ghosting at one distance gets its own floor instead of
+  polluting the zone), falling back to the aggregate path per frame whenever
+  the gate stream drops
 - **guided calibration** — record an empty-room baseline instead of hand
   tuning 18 gate thresholds
 
