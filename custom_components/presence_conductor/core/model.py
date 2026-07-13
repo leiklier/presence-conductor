@@ -109,8 +109,13 @@ class Tunables:
     #: (absence evidence is bounded so odd baselines cannot instantly unlatch).
     z_cap: float = 6.0
     z_neg_cap: float = 1.0
-    #: Floor for the statistic calibration's deviation ``s0`` (rule 3.7).
+    #: Floor for the statistic calibration's deviation ``s0`` (rule 3.7);
+    #: the analytic reference deviation for the path's gate count floors it
+    #: as well — a short window may recentre but never sharpen the score.
     stat_sigma_min: float = 0.3
+    #: Minimum calibration rows before an empirical statistic is accepted
+    #: (rule 3.7); shorter windows keep the analytic fallback.
+    stat_min_rows: int = 60
     #: Per-second evidence weights and the always-subtracted absence bias
     #: (rule 3.2): ``E[u | calibrated empty] <= -k_bias < 0``. The gains
     #: bound the *variance* of the empty walk (see 3.2); genuine-entry
@@ -125,8 +130,11 @@ class Tunables:
     tau_decay: float = 90.0
     #: Empty-state prior confidence (rule 4.1).
     p_prior: float = 0.02
-    #: Fast-attack trigger (centered units), confirmation and floor (rule 4.2).
-    z_attack: float = 4.5
+    #: Fast-attack tail probability (parts per million), confirmation and
+    #: floor (rule 4.2). Candidacy thresholds on the analytic tail of the
+    #: raw statistic — per-observation ``P_H0(S >= threshold) =
+    #: attack_tail_ppm * 1e-6`` — never on a window-estimated tail.
+    attack_tail_ppm: float = 100.0
     attack_confirm: int = 2
     attack_gap_min: float = 0.3
     attack_gap_max: float = 3.0
@@ -246,11 +254,11 @@ class ZoneState:
     #: ``Tunables`` defaults and zones that never see gate data stay empty.
     gate_move_baselines: dict[int, ChannelStats] = field(default_factory=dict)
     gate_still_baselines: dict[int, ChannelStats] = field(default_factory=dict)
-    #: Statistic calibration (rule 3.7): empty-room ``(m0, s0)`` of the raw
-    #: statistic per channel + path, keyed ``move_agg`` / ``move_gate`` /
-    #: ``still_agg`` / ``still_gate``. A missing key means the analytic
+    #: Statistic calibration (rule 3.7): empty-room ``(m0, s0, c0)`` of the
+    #: raw statistic per channel + path, keyed ``move_agg`` / ``move_gate``
+    #: / ``still_agg`` / ``still_gate``. A missing key means the analytic
     #: Gaussian fallback applies.
-    stat_cal: dict[str, ChannelStats] = field(default_factory=dict)
+    stat_cal: dict[str, StatBaseline] = field(default_factory=dict)
     # -- published outputs (§0) ----------------------------------------
     occupied: bool = False
     motion: bool = False
@@ -271,8 +279,13 @@ class ZoneState:
     #: global ``has_moving_target`` flag while gates say where the mover is.
     move_from_gates: bool = False
     still_from_gates: bool = False
-    #: Fast-attack candidate timestamp (rule 4.2 confirmation).
-    attack_at: float | None = None
+    #: Whether this frame's raw move statistic exceeds the analytic attack
+    #: tail threshold (rule 4.2 candidacy; set by evidence ingest).
+    attack_candidate: bool = False
+    #: Fast-attack confirmation chain (rule 4.2): fresh qualifying move
+    #: observations counted so far, and when the last one arrived.
+    attack_count: int = 0
+    attack_last: float | None = None
     # -- activity FSM internals (rule 5) --------------------------------
     occupied_since: float | None = None
     peak_confidence: float = 0.0
@@ -307,6 +320,12 @@ class SensorState:
     #: When each target flag was last observed on (rule 2.7 distance hold).
     move_flag_at: float | None = None
     still_flag_at: float | None = None
+    #: Freshness of the current frame's move channel (rule 4.2): the
+    #: adapter re-emits the complete cached frame on any entity change, so
+    #: only a *changed* move view is a new move measurement. ``move_view``
+    #: is the last seen raw move fields; ``move_fresh`` is per-frame.
+    move_view: tuple[object, ...] | None = None
+    move_fresh: bool = False
 
 
 @dataclass(slots=True)
@@ -351,11 +370,13 @@ class GateBaselines:
 
 @dataclass(frozen=True, slots=True)
 class StatBaseline:
-    """Persisted statistic calibration (rule 3.7) for one channel + path:
-    empty-room mean and deviation of the raw statistic ``S``."""
+    """Statistic calibration (rule 3.7) for one channel + path: empty-room
+    mean and deviation of the raw statistic ``S``, plus the residual mean
+    of the clamped centered score (``c0``, rule 3.2)."""
 
     mu: float
     sigma: float
+    clip_mu: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

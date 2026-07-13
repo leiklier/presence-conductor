@@ -40,7 +40,7 @@ from custom_components.presence_conductor.core.model import (
     ZoneState,
 )
 from custom_components.presence_conductor.core.plan import BaselineRecorded, PassBy, Plan
-from custom_components.presence_conductor.core.stats import onesided_max_stats
+from custom_components.presence_conductor.core.stats import clipped_mean, onesided_max_stats
 
 KONTOR = "kontor"
 SOFAKROK = "sofakrok"
@@ -61,22 +61,22 @@ STAT_M0 = 0.39894228040139595
 STAT_S0 = 0.5838193701035719
 
 
+def centered_of(raw_s: float, m: int = 1) -> float:
+    """Centered score (rule 3.2) of a raw statistic ``S`` under the analytic
+    fallback for ``m`` owned gates (rule 3.7) and default caps, including
+    the clipped-mean recentering (c0, rule 3.2)."""
+    m0, s0 = onesided_max_stats(m)
+    return min(6.0, max(-1.0, (raw_s - m0) / s0)) - clipped_mean(m, 1.0, 6.0)
+
+
 def centered_of_raw(raw_energy: float, *, mu: float = MU, sigma: float = SIGMA) -> float:
     """The centered score (rule 3.2) a gated frame with this raw 0-100
     energy produces under the default snapshot's floors."""
-    s = max(0.0, (raw_energy / 100.0 - mu) / sigma)
-    return min(6.0, max(-1.0, (s - STAT_M0) / STAT_S0))
+    return centered_of(max(0.0, (raw_energy / 100.0 - mu) / sigma), 1)
 
 
 #: Centered score of a channel sitting exactly at the noise floor (S = 0).
-Z_EMPTY = (0.0 - STAT_M0) / STAT_S0
-
-
-def centered_of(raw_s: float, m: int = 1) -> float:
-    """Centered score (rule 3.2) of a raw statistic ``S`` under the analytic
-    fallback for ``m`` owned gates (rule 3.7) and default caps."""
-    m0, s0 = onesided_max_stats(m)
-    return min(6.0, max(-1.0, (raw_s - m0) / s0))
+Z_EMPTY = centered_of(0.0, 1)
 
 
 DEFAULT_ZONES = (
@@ -230,8 +230,10 @@ class Harness:
         flips occupied — two qualifying frames ``attack_gap_min`` apart."""
         gap = self.config.tunables.attack_gap_min
         self.send_frame(sensor_id, move_d=distance, move_e=35.0, moving=True, at=at)
+        # 4.2: the energy changes between the frames — a fresh observation,
+        # as ESPHome dedup guarantees for real measurements.
         return self.send_frame(
-            sensor_id, move_d=distance, move_e=35.0, moving=True, at=self.now + gap
+            sensor_id, move_d=distance, move_e=36.0, moving=True, at=self.now + gap
         )
 
     def tick(self, at: float | None = None) -> Plan:

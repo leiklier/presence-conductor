@@ -16,6 +16,7 @@ from .harness import (
     SPISEBORD,
     Z_EMPTY,
     Harness,
+    centered_of_raw,
     make_config,
     make_snapshot,
 )
@@ -26,7 +27,7 @@ class TestRule21ZoneMask:
         h = Harness()
         h.send_frame(KONTOR, move_d=100, move_e=35, moving=True)
         assert h.zone(DESK).move_gated
-        assert h.zone(DESK).z_move == pytest.approx(6.0)  # capped centered score
+        assert h.zone(DESK).z_move == pytest.approx(centered_of_raw(35))  # capped
         assert not h.zone(DOOR).move_gated
         assert h.zone(DOOR).z_move == pytest.approx(Z_EMPTY)  # 3.2: absence
 
@@ -52,7 +53,7 @@ class TestRule21ZoneMask:
         h = Harness()
         h.send_frame(KONTOR, still_d=100, still_e=35, still=True)
         assert h.zone(DESK).still_gated
-        assert h.zone(DESK).z_still == pytest.approx(6.0)
+        assert h.zone(DESK).z_still == pytest.approx(centered_of_raw(35))
         assert not h.zone(DESK).move_gated
 
 
@@ -81,7 +82,7 @@ class TestRule23FallbackAttribution:
         h = Harness()
         h.send_frame(KONTOR, move_d=None, move_e=35, moving=True)
         assert h.zone(DESK).move_gated  # desk is flagged fallback
-        h.send_frame(KONTOR, move_d=None, move_e=35, moving=True, at=h.now + 0.3)
+        h.send_frame(KONTOR, move_d=None, move_e=36, moving=True, at=h.now + 0.3)
         assert h.zone(DESK).occupied  # 4.2 rides on the attributed evidence
         assert not h.zone(DOOR).move_gated
 
@@ -109,7 +110,7 @@ class TestRule14UnitHygiene:
     def test_rule_1_4_energies_clamped_then_normalized(self) -> None:
         h = Harness()
         h.send_frame(KONTOR, move_d=100, move_e=150, moving=True)  # clamped to 100 -> 1.0
-        assert h.zone(DESK).z_move == pytest.approx(6.0)  # capped at z_cap (3.2)
+        assert h.zone(DESK).z_move == pytest.approx(centered_of_raw(100))  # capped (3.2)
 
     def test_rule_1_4_negative_energy_clamps_to_zero(self) -> None:
         h = Harness()

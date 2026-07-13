@@ -308,7 +308,7 @@ def replay(
                 # Rule 3.7: optional statistic calibration, keyed like the
                 # config entry.
                 stats={
-                    key: StatBaseline(mu=s["mu"], sigma=s["sigma"])
+                    key: StatBaseline(mu=s["mu"], sigma=s["sigma"], clip_mu=s.get("clip_mu", 0.0))
                     for key, s in (b.get("stats") or {}).items()
                 },
             )

@@ -17,6 +17,7 @@ from .harness import (
     SOFAKROK,
     Z_EMPTY,
     Harness,
+    centered_of_raw,
     make_config,
     make_snapshot,
     quiet,
@@ -40,7 +41,7 @@ class TestRule32EvidenceScore:
     def test_rule_3_2_z_capped_at_z_cap(self) -> None:
         h = Harness()
         h.send_frame(KONTOR, still_d=100, still_e=100, still=True)
-        assert h.zone(DESK).z_still == pytest.approx(6.0)  # z_cap
+        assert h.zone(DESK).z_still == pytest.approx(centered_of_raw(100))  # z_cap
 
     def test_rule_3_2_weights_shape_the_evidence_rate(self) -> None:
         h = Harness()
@@ -49,7 +50,7 @@ class TestRule32EvidenceScore:
         # 4.1: exact constant-input update over dt = 1 with
         # u = k_still * 6 + k_move * Z_EMPTY - k_bias.
         t = h.config.tunables
-        u = min(t.u_cap, t.k_still * 6.0 + t.k_move * Z_EMPTY - t.k_bias)
+        u = min(t.u_cap, t.k_still * centered_of_raw(35) + t.k_move * Z_EMPTY - t.k_bias)
         expected = advance(h.engine.lam_prior, h.engine.lam_prior, u, 1.0, 90.0)
         assert h.zone("sofakrok_zone").lam == pytest.approx(expected)
 

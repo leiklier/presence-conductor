@@ -74,29 +74,35 @@ def on_frame(engine: ConductorEngine, frame: SensorFrame, now: float, plan: Plan
     up-to-date belief.
     """
     t = engine.config.tunables
+    sensor = engine.state.sensors[frame.sensor_id]
     for zone in engine.config.zones_for_sensor(frame.sensor_id):
         zst = engine.state.zones[zone.zone_id]
-        # 4.2: strong gated move evidence floors the belief immediately -
-        # not waiting for the next tick - once *confirmed*: a single frame
-        # is a max-over-gates excursion empty noise produces routinely
-        # (3.2); two, separated by a real radar interval, is a mover. This
-        # is the lights-on path. Under gate precedence (2.6) the score is
-        # the centered owned-gate max and the gated flag is spatial, so the
-        # attack fires on whichever move score the frame produced.
-        if zst.move_gated and zst.z_move >= t.z_attack:
-            first = zst.attack_at
-            # 1 µs absorbs float noise in the gap arithmetic: timestamps are
-            # large monotonic values whose difference can land just under
-            # the gap (float granularity near 2e9 is ~2.4e-7 s).
-            confirmed = t.attack_confirm <= 1 or (
-                first is not None and t.attack_gap_min - 1e-6 <= now - first <= t.attack_gap_max
-            )
-            if first is None or now - first > t.attack_gap_max:
-                zst.attack_at = now  # 4.2: candidate (re)armed
-            if confirmed:
-                set_lambda(engine, zone, zst, max(zst.lam, engine.lam_attack), now, plan)
-        else:
-            zst.attack_at = None  # 4.2: a non-qualifying frame clears
+        # 4.2: strong move evidence floors the belief immediately - not
+        # waiting for the next tick - once *confirmed*: attack_confirm
+        # FRESH move observations, each past the analytic tail threshold
+        # (candidacy is set by evidence ingest on the raw statistic).
+        # Non-fresh frames carry no new move measurement (the adapter
+        # re-emits its cached frame on any entity change) and leave the
+        # chain untouched; elapsed time alone proves nothing.
+        if sensor.move_fresh:
+            if zst.attack_candidate:
+                last = zst.attack_last
+                if last is None or now - last > t.attack_gap_max:
+                    zst.attack_count = 1  # 4.2: chain (re)starts
+                    zst.attack_last = now
+                # 1 µs absorbs float noise in the gap arithmetic: monotonic
+                # timestamps are large, and a 0.3 s difference can land
+                # just under 0.3 in binary floats.
+                elif now - last >= t.attack_gap_min - 1e-6:
+                    zst.attack_count += 1
+                    zst.attack_last = now
+                # else: within one radar burst (per-gate entities update in
+                # a flurry from a single radar frame) - not distinct.
+                if zst.attack_count >= t.attack_confirm:
+                    set_lambda(engine, zone, zst, max(zst.lam, engine.lam_attack), now, plan)
+            else:
+                zst.attack_count = 0  # 4.2: fresh non-qualifying resets
+                zst.attack_last = None
         # 4.4: gated, undamped fast channel. Under gate precedence (2.6) the
         # sensor-global has_moving_target flag is not zone evidence - the
         # owned gates already say where the mover is.

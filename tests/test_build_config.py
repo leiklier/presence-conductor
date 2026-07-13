@@ -134,8 +134,8 @@ def test_tunables_partial_merge_and_unknown_keys() -> None:
     assert tunables.tau_decay == 120.0
     assert tunables.theta_off == Tunables().theta_off  # untouched default
 
-    config = build_config({**_options(), "tunables": {"z_attack": 2.5}})
-    assert config.tunables.z_attack == 2.5
+    config = build_config({**_options(), "tunables": {"attack_tail_ppm": 50.0}})
+    assert config.tunables.attack_tail_ppm == 50.0
     assert config.tunables.k_move == Tunables().k_move
 
 

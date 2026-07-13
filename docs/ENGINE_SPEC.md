@@ -150,10 +150,15 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   construction* — `E[S] > 0` under symmetric empty noise, and grows with
   the number of owned gates (a max over m gates is a multiple-comparison
   statistic). It is therefore never used directly: the **centered score**
-  is `ẑ = (S − m0) / s0`, clamped to `[−z_neg_cap, z_cap]` (defaults 1.0 /
+  is `ẑ = clamp((S − m0) / s0, −z_neg_cap, z_cap) − c0` (caps default 1.0 /
   6.0), where `(m0, s0)` are the mean and deviation of `S` itself in a
   calibrated empty room (3.7) — for the *same* aggregation the channel used
-  (per path, per owned-gate count). `E[ẑ] ≈ 0` when empty, by construction.
+  (per path, per owned-gate count) — and `c0` is the empty-room mean of the
+  *clamped* score: asymmetric clamping alone would leave a positive
+  residual mean for multi-gate maxima (≈ +0.05 to +0.07), so the final
+  score is recentered after clamping. `E[ẑ | empty] = 0` up to estimation
+  error, by construction — measured for empirical calibrations, derived
+  numerically for the analytic fallback.
   The per-second evidence rate is
   `u = min(u_cap, k_move · ẑ_move + k_still · ẑ_still − k_bias)`
   (defaults `k_move = 0.5`, `k_still = 0.3`, `k_bias = 0.4`, `u_cap =
@@ -210,19 +215,31 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   load unchanged, and zones without per-gate floors persist without it —
   the schema is backward compatible in both directions.
 - **3.7 Statistic calibration.** Per zone, per channel and per evidence
-  path (gate / aggregate), calibration produces `(m0, s0)` — the mean and
-  standard deviation of the raw statistic `S` (3.2) over the calibration
-  rows, scored against the *new* floors, with `s0` floored by
-  `stat_sigma_min` (default 0.3). This calibrates the **post-aggregation**
-  statistic: quantization, held/deduplicated values, gate correlation and
-  the owned-gate count are all captured empirically, so adding gates to a
-  zone cannot silently raise its false-alarm rate. Persisted alongside the
-  floors (optional keys; older baselines load without them). When a path
-  has no empirical `(m0, s0)` — pre-3.7 baselines, or a path that produced
-  no calibration rows — the engine falls back to the **analytic** values
-  for `max(0, max of m iid N(0,1))` with `m` = the zone's owned-gate count
+  path (gate / aggregate), calibration produces `(m0, s0, c0)` — the mean
+  and standard deviation of the raw statistic `S` (3.2) over the
+  calibration rows, scored against the *new* floors, plus the residual
+  mean of the clamped score (3.2). This calibrates the
+  **post-aggregation** statistic: quantization, held/deduplicated values,
+  gate correlation and the owned-gate count are all captured empirically,
+  so adding gates to a zone cannot silently raise its false-alarm rate.
+  A short window estimates a *scale* poorly, and an underestimated `s0`
+  inflates every future score — a hazard, not a calibration — so the
+  empirical calibration is **shrunk toward safety**: it requires at least
+  `stat_min_rows` rows (default 60, else the path stays on the fallback),
+  and `s0` is floored by the analytic reference deviation for the path's
+  gate count (and by `stat_sigma_min`, default 0.3). Empirical calibration
+  may *recentre* the score (deduplicated real traffic sits well below the
+  Gaussian mean) but may never *sharpen* it beyond the analytic scale:
+  a 120 s window simply cannot certify a smaller-than-Gaussian tail.
+  Persisted alongside the floors (optional keys; older baselines load
+  without them). When a path has no accepted empirical calibration the
+  engine falls back to the **analytic** values for
+  `max(0, max of m iid N(0,1))` with `m` = the zone's owned-gate count
   (gate path) or 1 (aggregate path): exact under ideal Gaussian noise,
   conservative (extra-negative `ẑ`) under real deduplicated traffic.
+  Rare-tail behavior is never taken from the window at all: the fast
+  attack (4.2) thresholds on the analytic tail regardless of calibration,
+  until long-run empty recordings exist to certify anything sharper (8.7).
 
 ## 4. Occupancy filter
 
@@ -240,19 +257,36 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   (default corresponding to a confidence of 0.02) and `tau_decay` defaults
   to 90 s. The relaxation implements the hazard of departure; there is no
   fixed occupancy timeout anywhere in the engine.
-- **4.2 Fast attack.** A frame with gated move evidence at
-  `ẑ_move ≥ z_attack` (default 4.5, centered units) is an attack
-  *candidate*. The attack fires — `lambda ← max(lambda, lambda_attack)`
-  (default corresponding to a confidence of 0.95), immediately, not waiting
-  for a tick — on the **second consecutive** qualifying frame at least
-  `attack_gap_min` (default 0.3 s) and at most `attack_gap_max` (default
-  3 s) after the candidate; a non-qualifying frame for the zone clears the
-  candidate. One frame is a max-over-gates excursion that empty-room noise
-  produces routinely (3.2); two, separated by a real radar interval, is a
-  mover. This is still the lights-on path — its latency is bounded by the
-  sensor's publish cadence, and the tick integration of strong evidence
-  latches occupancy within ~1 s regardless. Set `attack_confirm = 1` to
-  restore single-frame attack.
+- **4.2 Fast attack.** Attack candidacy is a **tail-probability event on
+  the raw statistic**, not a centered-score threshold: a gated move
+  observation qualifies iff its raw `S` exceeds the analytic threshold
+  `Φ⁻¹((1 − attack_tail)^(1/m))` for the path's gate count (`m` owned
+  gates, or 1 on the aggregate path; `attack_tail_ppm` defaults to 100
+  parts per million — 1e-4 per observation). Mean/std standardization does not equalize *tails* across
+  gate counts — a centered threshold of 4.5 fires ~10× more often for one
+  gate than for three — and a 120 s calibration window cannot estimate a
+  1e-4 tail, so attack thresholds are always analytic (3.7), never
+  empirical. The attack fires — `lambda ← max(lambda, lambda_attack)`
+  (default corresponding to a confidence of 0.95), immediately, not
+  waiting for a tick — once `attack_confirm` (default 2) qualifying
+  **fresh move observations** have arrived, consecutive ones separated by
+  at least `attack_gap_min` (default 0.3 s) and at most `attack_gap_max`
+  (default 3 s). *Fresh* means the frame's move-channel fields (gate-move
+  tuple, move energy, moving distance, moving flag) actually changed:
+  the adapter re-emits its complete cached frame on **any** entity change,
+  so an unrelated update (a still-energy heartbeat) re-presents a held
+  move spike without any new move measurement behind it — elapsed time
+  alone proves nothing. Under ESPHome deduplication a changed value is
+  exactly a new measurement; `attack_gap_min` additionally collapses the
+  burst of per-gate entity updates one radar frame produces. Non-fresh
+  frames leave the attack state untouched; a fresh non-qualifying move
+  observation resets the count. One observation is a max-over-gates
+  excursion that empty-room noise produces routinely (3.2); N fresh ones,
+  separated by real radar intervals, are a mover. This is still the
+  lights-on path — its latency is bounded by the sensor's publish cadence,
+  and the tick integration of strong evidence latches occupancy within
+  ~2 s regardless. Set `attack_confirm = 1` to restore single-observation
+  attack.
 - **4.3 Hysteresis.** `occupied` turns on at `lambda ≥ theta_on`
   (default confidence 0.80) and off at `lambda ≤ theta_off` (default
   confidence 0.20). Between thresholds the binary holds.

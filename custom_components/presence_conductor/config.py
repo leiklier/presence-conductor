@@ -112,7 +112,11 @@ def baselines_from_options(options: Mapping[str, Any]) -> dict[str, ZoneBaseline
             # before 3.7 have no "stats" key and fall back to the analytic
             # values.
             stats={
-                key: StatBaseline(mu=float(s["mu"]), sigma=float(s["sigma"]))
+                key: StatBaseline(
+                    mu=float(s["mu"]),
+                    sigma=float(s["sigma"]),
+                    clip_mu=float(s.get("clip_mu", 0.0)),
+                )
                 for key, s in (b.get("stats") or {}).items()
             },
         )

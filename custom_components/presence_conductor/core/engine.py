@@ -20,7 +20,7 @@ mutable state, and every iteration follows config declaration order.
 
 from __future__ import annotations
 
-from . import activity, evidence, fusion, gating, health, timers
+from . import activity, evidence, fusion, gating, health, stats, timers
 from . import filter as filter_
 from .belief import logit
 from .events import (
@@ -64,6 +64,17 @@ class ConductorEngine:
         self.owned_gates: dict[str, tuple[int, ...]] = {
             zone.zone_id: gating.owned_gates(
                 zone, config.sensor(zone.sensor_id).gate_size_cm, t.margin_cm
+            )
+            for zone in config.zones
+        }
+        #: Fast-attack candidacy thresholds on the raw statistic (rule 4.2):
+        #: per zone, ``(gate path, aggregate path)`` — analytic tail values,
+        #: never taken from a calibration window.
+        tail = t.attack_tail_ppm * 1e-6
+        self.attack_thresholds: dict[str, tuple[float, float]] = {
+            zone.zone_id: (
+                stats.attack_threshold(len(self.owned_gates[zone.zone_id]), tail),
+                stats.attack_threshold(1, tail),
             )
             for zone in config.zones
         }
@@ -112,8 +123,7 @@ class ConductorEngine:
                 # 3.7: persisted statistic calibration; missing keys (and
                 # pre-3.7 baselines) fall back to the analytic values.
                 for key in sorted(persisted.stats):
-                    stat = persisted.stats[key]
-                    zst.stat_cal[key] = ChannelStats(stat.mu, stat.sigma)
+                    zst.stat_cal[key] = persisted.stats[key]
             if not state.sensors[zone.sensor_id].available:
                 zst.health = Health.UNKNOWN  # 1.3
             state.zones[zone.zone_id] = zst

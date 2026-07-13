@@ -23,6 +23,7 @@ from .harness import (
     Harness,
     calibrated_gate_floors,
     centered_of,
+    centered_of_raw,
     frame,
     gate_tuple,
     make_config,
@@ -86,7 +87,7 @@ class TestRule25GateEvidence:
         # At gate 4's own elevated floor (3.6): raw S = 0 centers negative.
         assert h.zone(DOOR).z_move == pytest.approx(centered_of(0.0, m=3))
         h.send_frame(KONTOR, gate_move=gate_tuple({3: 40}))
-        assert h.zone(DOOR).z_move == pytest.approx(6.0)  # sibling gate: z_cap
+        assert h.zone(DOOR).z_move == pytest.approx(centered_of(7.0, m=3))  # sibling
 
     def test_rule_2_5_two_people_in_two_zones_of_one_sensor(self) -> None:
         h = make_harness()
@@ -94,7 +95,7 @@ class TestRule25GateEvidence:
         # (door): both zones are credited at once - impossible in the
         # single-distance model (2.1), which reports one distance per kind.
         h.send_frame(KONTOR, gate_move=gate_tuple({1: 35, 4: 35}))
-        h.send_frame(KONTOR, gate_move=gate_tuple({1: 35, 4: 35}), at=h.now + 0.3)
+        h.send_frame(KONTOR, gate_move=gate_tuple({1: 36, 4: 36}), at=h.now + 0.3)
         assert h.zone(DESK).occupied  # 4.2 (confirmed) on the gate move score
         assert h.zone(DOOR).occupied
 
@@ -127,9 +128,9 @@ class TestRule26GatePrecedence:
         # Engineering mode drops: the very next frame has no gate data and
         # the aggregate path applies unchanged - no mode latch.
         h.send_frame(KONTOR, move_d=100, move_e=35, moving=True)
-        assert h.zone(DESK).z_move == pytest.approx(6.0)
-        h.send_frame(KONTOR, move_d=100, move_e=35, moving=True, at=h.now + 0.3)
-        assert h.zone(DESK).occupied  # 4.2 (confirmed)
+        assert h.zone(DESK).z_move == pytest.approx(centered_of_raw(35))
+        h.send_frame(KONTOR, move_d=100, move_e=36, moving=True, at=h.now + 0.3)
+        assert h.zone(DESK).occupied  # 4.2 (confirmed, fresh)
 
     def test_rule_2_6_all_owned_gates_unknown_falls_back_per_zone(self) -> None:
         h = make_harness()
@@ -144,16 +145,16 @@ class TestRule26GatePrecedence:
         )
         desk, door = h.zone(DESK), h.zone(DOOR)
         assert not desk.move_from_gates
-        assert desk.z_move == pytest.approx(6.0)  # aggregate (2.1-2.3)
+        assert desk.z_move == pytest.approx(centered_of_raw(35))  # aggregate
         assert door.move_from_gates
-        assert door.z_move == pytest.approx(6.0)  # gate 4 (2.5)
+        assert door.z_move == pytest.approx(centered_of(6.0, m=3))  # gate 4 (2.5)
 
     def test_rule_2_6_channels_fall_back_independently(self) -> None:
         h = make_harness()
         h.send_frame(KONTOR, still_d=100, still_e=35, still=True, gate_move=gate_tuple())
         desk = h.zone(DESK)
         assert desk.z_move == pytest.approx(centered_of(0.0, m=3))  # quiet gates
-        assert desk.z_still == pytest.approx(6.0)  # still channel: aggregate
+        assert desk.z_still == pytest.approx(centered_of_raw(35))  # aggregate
 
     def test_rule_2_6_zone_without_owned_gates_stays_on_the_aggregate_path(self) -> None:
         config = ConductorConfig(
@@ -163,12 +164,12 @@ class TestRule26GatePrecedence:
         h = Harness(config, make_snapshot(config))
         assert h.engine.owned_gates["far_zone"] == ()  # 2.4
         h.send_frame(KONTOR, move_d=550, move_e=35, moving=True, gate_move=gate_tuple({1: 35}))
-        assert h.zone("far_zone").z_move == pytest.approx(6.0)  # aggregate (2.6)
+        assert h.zone("far_zone").z_move == pytest.approx(centered_of_raw(35))  # 2.6
 
     def test_rule_2_6_fast_attack_rides_the_gate_move_z(self) -> None:
         h = make_harness()
-        h.send_frame(KONTOR, gate_move=gate_tuple({1: 35}))  # centered 6 >= z_attack
-        h.send_frame(KONTOR, gate_move=gate_tuple({1: 35}), at=h.now + 0.3)
+        h.send_frame(KONTOR, gate_move=gate_tuple({1: 35}))  # raw 6 >= tail threshold
+        h.send_frame(KONTOR, gate_move=gate_tuple({1: 36}), at=h.now + 0.3)  # fresh
         assert h.zone(DESK).occupied  # 4.2: confirmed, no tick needed
 
     def test_rule_2_6_motion_keys_on_gate_z_not_the_global_flag(self) -> None:
@@ -239,7 +240,7 @@ class TestRule36PerGateFloors:
         h = Harness(config, make_snapshot(config, gate_floors=calibrated_gate_floors(config)))
         h.run(61)
         h.send_frame(KONTOR, gate_move=gate_tuple({1: 35}))  # 4.2 candidate
-        h.send_frame(KONTOR, gate_move=gate_tuple({1: 35}), at=h.now + 0.3)  # confirmed
+        h.send_frame(KONTOR, gate_move=gate_tuple({1: 36}), at=h.now + 0.3)  # confirmed
         desk = h.zone(DESK)
         assert desk.below_since is None  # clock reset immediately (3.4)
         mu_before = desk.gate_move_baselines[1].mu

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 from functools import lru_cache
+from statistics import NormalDist
 
 from .events import GATE_COUNT
 
@@ -22,6 +23,11 @@ from .events import GATE_COUNT
 def _phi(x: float) -> float:
     """Standard normal CDF."""
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _pdf(x: float) -> float:
+    """Standard normal density."""
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
 
 
 @lru_cache(maxsize=GATE_COUNT + 1)
@@ -46,3 +52,44 @@ def onesided_max_stats(m: int) -> tuple[float, float]:
     e1 *= h / 3.0
     e2 *= h / 3.0
     return e1, math.sqrt(max(0.0, e2 - e1 * e1))
+
+
+@lru_cache(maxsize=64)
+def clipped_mean(m: int, neg_cap: float, pos_cap: float) -> float:
+    """Mean of the *clamped* centered score under the analytic model (3.2).
+
+    Asymmetric clamping of ``(S - m0) / s0`` to ``[-neg_cap, pos_cap]``
+    leaves a positive residual mean for multi-gate maxima (the left tail
+    is cut, the right one barely is); rule 3.2 subtracts this value so the
+    final score is exactly mean-zero. ``S`` has an atom at 0 of mass
+    ``Phi(0)^m`` and density ``m Phi(s)^(m-1) phi(s)`` above it.
+    """
+    m = max(1, m)
+    m0, s0 = onesided_max_stats(m)
+
+    def clip(s: float) -> float:
+        return min(pos_cap, max(-neg_cap, (s - m0) / s0))
+
+    total = (0.5**m) * clip(0.0)
+    upper, steps = 8.0, 4000
+    h = upper / steps
+    acc = 0.0
+    for i in range(steps + 1):
+        x = i * h
+        density = m * _phi(x) ** (m - 1) * _pdf(x)
+        weight = 1.0 if i in (0, steps) else (4.0 if i % 2 else 2.0)
+        acc += weight * clip(x) * density
+    return total + acc * h / 3.0
+
+
+@lru_cache(maxsize=64)
+def attack_threshold(m: int, tail: float) -> float:
+    """Raw-statistic threshold with ``P_H0(S >= threshold) = tail`` (4.2).
+
+    Mean/std standardization does not equalize tails across gate counts —
+    a fixed centered threshold fires ~10x more often for one gate than for
+    three — so attack candidacy thresholds on the tail probability of the
+    max itself: ``P(S >= s) = 1 - Phi(s)^m``.
+    """
+    m = max(1, m)
+    return NormalDist().inv_cdf((1.0 - tail) ** (1.0 / m))

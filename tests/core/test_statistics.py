@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import random
+from statistics import NormalDist
 
 import pytest
 
@@ -29,7 +30,11 @@ from custom_components.presence_conductor.core.model import (
     ZoneBaselines,
     ZoneConfig,
 )
-from custom_components.presence_conductor.core.stats import onesided_max_stats
+from custom_components.presence_conductor.core.stats import (
+    attack_threshold,
+    clipped_mean,
+    onesided_max_stats,
+)
 
 from .harness import (
     DESK,
@@ -40,6 +45,7 @@ from .harness import (
     Harness,
     InitialSnapshot,
     Tunables,
+    centered_of_raw,
     gate_tuple,
     make_config,
     make_snapshot,
@@ -155,6 +161,101 @@ def test_ghost_gated_aggregate_noise_never_occupies() -> None:
         assert not desk.occupied, f"false occupancy at t={second}"
 
 
+@pytest.mark.parametrize(
+    ("seed", "far_cm"),
+    [(13, 40.0), (14, 40.0), (17, 40.0), (21, 600.0)],
+)
+def test_review_seeds_stay_empty_for_an_hour(seed: int, far_cm: float) -> None:
+    """Fixed-seed regressions from the external review's stress sweep: these
+    seeds produced empirical calibrations whose underestimated scale (e.g.
+    seed 13: s0 = 0.405 vs the analytic 0.584) inflated every later score
+    and falsely occupied within the hour. The 3.7 shrinkage — analytic
+    scale floor, minimum rows, clip-mean recentering — plus the analytic
+    attack tail (4.2) must hold them empty."""
+    config = _gate_zone_config(far_cm)
+    h = Harness(config, InitialSnapshot())
+    owned = h.engine.owned_gates["z"]
+    rng = random.Random(seed)
+    h.submit(RecordBaseline("z", duration=120.0))
+    for _ in range(121):
+        h.send_frame(
+            KONTOR,
+            gate_move=_noise_tuple(rng, owned),
+            gate_still=_noise_tuple(rng, owned),
+        )
+        h.step_to(h.now + 1.0)
+    zone = h.zone("z")
+    reference_s0 = onesided_max_stats(len(owned))[1]
+    assert zone.stat_cal["move_gate"].sigma >= reference_s0  # 3.7 floor
+    for second in range(3600):
+        h.send_frame(
+            KONTOR,
+            gate_move=_noise_tuple(rng, owned),
+            gate_still=_noise_tuple(rng, owned),
+        )
+        h.step_to(h.now + 1.0)
+        assert not zone.occupied, f"seed {seed}: false occupancy at t={second}"
+
+
+class TestRule37Shrinkage:
+    def test_empirical_scale_is_floored_by_the_analytic_reference(self) -> None:
+        """A near-constant window would fit a tiny s0; the stored scale must
+        never fall below the analytic reference for the path (3.7)."""
+        config = _gate_zone_config(150.0)  # owns 3 gates
+        h = Harness(config, InitialSnapshot())
+        owned = h.engine.owned_gates["z"]
+        h.submit(RecordBaseline("z", duration=120.0))
+        for _ in range(121):
+            h.send_frame(
+                KONTOR,
+                gate_move=gate_tuple(dict.fromkeys(owned, 5.0), fill=None),
+                gate_still=gate_tuple(dict.fromkeys(owned, 5.0), fill=None),
+            )
+            h.step_to(h.now + 1.0)
+        cal = h.zone("z").stat_cal["move_gate"]
+        assert cal.sigma == pytest.approx(onesided_max_stats(3)[1])
+
+    def test_short_windows_keep_the_analytic_fallback(self) -> None:
+        """Fewer than stat_min_rows rows cannot certify a statistic (3.7):
+        the floors are replaced, the statistic calibration is not."""
+        config = _gate_zone_config(150.0)
+        h = Harness(config, InitialSnapshot())
+        owned = h.engine.owned_gates["z"]
+        rng = random.Random(3)
+        h.submit(RecordBaseline("z", duration=30.0))
+        for _ in range(31):
+            h.send_frame(KONTOR, gate_move=_noise_tuple(rng, owned))
+            h.step_to(h.now + 1.0)
+        zone = h.zone("z")
+        assert zone.gate_move_baselines  # floors were recorded
+        assert zone.stat_cal == {}  # statistic was not (3.7)
+
+
+class TestRule42AttackTail:
+    def test_thresholds_equalize_the_tail_across_gate_counts(self) -> None:
+        """P_H0(S >= threshold) is attack_tail for every m (4.2): the
+        candidate rate no longer depends 10x on the owned-gate count."""
+        tail = 1e-4
+        for m in (1, 3, 9):
+            threshold = attack_threshold(m, tail)
+            p = 1.0 - NormalDist().cdf(threshold) ** m
+            assert p == pytest.approx(tail, rel=1e-6), f"m={m}"
+
+    def test_clipped_mean_recenters_exactly(self) -> None:
+        """Monte Carlo: after subtracting clipped_mean, the clamped centered
+        score of a 3-gate max is mean-zero under H0 (3.2)."""
+        rng = random.Random(5)
+        m0, s0 = onesided_max_stats(3)
+        c0 = clipped_mean(3, 1.0, 6.0)
+        assert c0 > 0.03  # the asymmetric-clamp bias is real for m = 3
+        total = 0.0
+        n = 200_000
+        for _ in range(n):
+            s_raw = max(0.0, max(rng.gauss(0, 1) for _ in range(3)))
+            total += min(6.0, max(-1.0, (s_raw - m0) / s0)) - c0
+        assert total / n == pytest.approx(0.0, abs=0.01)
+
+
 class TestRule41Chronology:
     def test_new_evidence_is_never_applied_retroactively(self) -> None:
         """The review's exact reproduction: last tick at t=0, a strong still
@@ -229,7 +330,7 @@ class TestRule27DistanceHold:
         # energy margin still gates there (3.5 bridging).
         h.send_frame(KONTOR, move_d=100, move_e=35, at=10.0)
         assert h.zone(DESK).move_gated
-        assert h.zone(DESK).z_move == pytest.approx(6.0)
+        assert h.zone(DESK).z_move == pytest.approx(centered_of_raw(35))
 
     def test_frozen_distance_expires_after_the_hold(self) -> None:
         h = Harness()

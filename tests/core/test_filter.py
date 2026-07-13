@@ -13,9 +13,10 @@ from .harness import DESK, KONTOR, SOFA, SOFAKROK, Harness, make_config, make_sn
 
 class TestRule41LogOddsUpdate:
     def test_rule_4_1_decay_relaxes_toward_the_prior(self) -> None:
-        # k_bias = 0 and z_neg_cap = 0 isolate the pure relaxation of 4.1
-        # (a quiet channel's centered score is negative, 3.2).
-        config = make_config(k_bias=0.0, z_neg_cap=0.0)
+        # Zero weights and bias make u = 0, isolating the pure relaxation
+        # of 4.1; the attack path is weight-independent (raw-statistic
+        # candidacy), so occupy() still latches.
+        config = make_config(k_bias=0.0, k_move=0.0, k_still=0.0)
         h = Harness(config, make_snapshot(config))
         h.occupy(KONTOR)  # lambda -> lam_attack (4.2)
         h.submit(quiet(KONTOR))  # zero the stored evidence
@@ -39,34 +40,56 @@ class TestRule42FastAttack:
         h = Harness()
         h.send_frame(KONTOR, move_d=100, move_e=25, moving=True)  # candidate
         desk = h.zone(DESK)
-        assert not desk.occupied  # 4.2: one frame is not an attack
+        assert not desk.occupied  # 4.2: one observation is not an attack
         assert desk.motion  # 4.4 rides the first frame
-        h.send_frame(KONTOR, move_d=100, move_e=25, moving=True, at=0.3)
+        h.send_frame(KONTOR, move_d=100, move_e=26, moving=True, at=0.3)  # fresh
         assert desk.occupied  # confirmed: still before any tick
         assert desk.lam >= h.engine.lam_attack
         assert h.state.anyone_home is True  # 6.5: rises immediately
 
+    def test_rule_4_2_repeated_cached_frames_are_not_observations(self) -> None:
+        """A held move spike re-presented by unrelated entity changes must
+        not confirm the attack: elapsed time alone proves nothing (4.2)."""
+        h = Harness()
+        h.send_frame(KONTOR, move_d=100, move_e=25, moving=True)  # candidate
+        # Unrelated still-channel updates re-emit the identical move view.
+        h.send_frame(KONTOR, move_d=100, move_e=25, moving=True, still_e=10, at=0.5)
+        h.send_frame(KONTOR, move_d=100, move_e=25, moving=True, still_e=11, at=1.0)
+        assert not h.zone(DESK).occupied  # no fresh move measurement arrived
+
     def test_rule_4_2_gap_bounds_the_confirmation(self) -> None:
         # Zero evidence weights make the belief inert, isolating the attack
         # path (it keys on the raw candidate condition, not the weights).
+        # Energies alternate so every frame is a fresh observation (4.2).
         config = make_config(k_move=0.0, k_still=0.0, k_bias=0.0)
         h = Harness(config, make_snapshot(config))
         h.send_frame(KONTOR, move_d=100, move_e=25, moving=True)
-        # Too close: radar has not produced a fresh reading yet.
-        h.send_frame(KONTOR, move_d=100, move_e=25, moving=True, at=0.1)
+        # Too close: within one radar burst — not a distinct observation.
+        h.send_frame(KONTOR, move_d=100, move_e=26, moving=True, at=0.1)
         assert not h.zone(DESK).occupied
-        # Too late: the candidate expired and this frame re-arms instead.
+        # Too late: the chain expired and this observation restarts it.
         h.send_frame(KONTOR, move_d=100, move_e=25, moving=True, at=5.0)
         assert not h.zone(DESK).occupied
-        # A non-qualifying frame clears the candidate outright.
+        # A fresh non-qualifying move observation resets the count.
         h.send_frame(KONTOR, move_d=100, move_e=5, moving=False, at=5.2)
-        h.send_frame(KONTOR, move_d=100, move_e=25, moving=True, at=5.4)
-        assert not h.zone(DESK).occupied  # 5.4 is a fresh candidate
-        # And a well-spaced confirming frame fires it.
+        h.send_frame(KONTOR, move_d=100, move_e=26, moving=True, at=5.4)
+        assert not h.zone(DESK).occupied  # 5.4 restarts the chain
+        # And a well-spaced fresh confirming observation fires it.
         h.send_frame(KONTOR, move_d=100, move_e=25, moving=True, at=5.8)
         assert h.zone(DESK).occupied
 
-    def test_rule_4_2_attack_confirm_1_restores_single_frame(self) -> None:
+    @pytest.mark.parametrize("confirm", [1, 2, 3, 5])
+    def test_rule_4_2_attack_confirm_counts_fresh_observations(self, confirm: int) -> None:
+        """attack_confirm = N fires on exactly the Nth fresh qualifying
+        observation, not the second (4.2)."""
+        config = make_config(k_move=0.0, k_still=0.0, k_bias=0.0, attack_confirm=confirm)
+        h = Harness(config, make_snapshot(config))
+        for i in range(confirm):
+            assert not h.zone(DESK).occupied, f"fired before observation {i + 1}"
+            h.send_frame(KONTOR, move_d=100, move_e=25 + (i % 2), moving=True, at=i * 0.5 + 0.5)
+        assert h.zone(DESK).occupied
+
+    def test_rule_4_2_attack_confirm_1_restores_single_observation(self) -> None:
         config = make_config(attack_confirm=1)
         h = Harness(config, make_snapshot(config))
         h.send_frame(KONTOR, move_d=100, move_e=25, moving=True)

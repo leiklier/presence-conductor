@@ -516,7 +516,8 @@ class PresenceConductorController:
             # before 3.7 (or not at all) persist without it and score
             # against the analytic fallback.
             stats = {
-                key: {"mu": cal.mu, "sigma": cal.sigma} for key, cal in sorted(zst.stat_cal.items())
+                key: {"mu": cal.mu, "sigma": cal.sigma, "clip_mu": cal.clip_mu}
+                for key, cal in sorted(zst.stat_cal.items())
             }
             if stats:
                 record["stats"] = stats

@@ -29,6 +29,7 @@ from .model import (
     BaselineRow,
     ChannelStats,
     Health,
+    StatBaseline,
     Tunables,
     ZoneState,
 )
@@ -90,19 +91,22 @@ def gate_statistic(
     return max(scores)
 
 
-def centered(raw: float, cal: ChannelStats | None, m: int, t: Tunables) -> float:
+def centered(raw: float, cal: StatBaseline | None, m: int, t: Tunables) -> float:
     """Center a raw statistic against its empty-room distribution (3.2).
 
     ``cal`` is the empirical statistic calibration (3.7); ``None`` falls
     back to the analytic distribution of a max over ``m`` gates (or ``m=1``
-    for the aggregate path). Clamped to ``[-z_neg_cap, z_cap]``.
+    for the aggregate path). Clamped to ``[-z_neg_cap, z_cap]``, then the
+    clamped score's own empty-room mean (``c0``) is subtracted — the
+    asymmetric clamp alone would leave a positive residual mean (3.2).
     """
     if cal is None:
         m0, s0 = stats.onesided_max_stats(m)  # 3.7 analytic fallback
+        c0 = stats.clipped_mean(m, t.z_neg_cap, t.z_cap)
     else:
-        m0, s0 = cal.mu, cal.sigma
+        m0, s0, c0 = cal.mu, cal.sigma, cal.clip_mu
     score = (raw - m0) / max(s0, t.stat_sigma_min)
-    return min(t.z_cap, max(-t.z_neg_cap, score))
+    return min(t.z_cap, max(-t.z_neg_cap, score)) - c0
 
 
 def evidence_rate(zst: ZoneState, t: Tunables) -> float:
@@ -147,6 +151,7 @@ def ingest_frame(engine: ConductorEngine, frame: SensorFrame, now: float | None)
         move_gated, still_gated = gates[zone.zone_id]
         raw_move = gate_statistic(gate_move, owned, zst.gate_move_baselines, t)  # 2.5
         raw_still = gate_statistic(gate_still, owned, zst.gate_still_baselines, t)  # 2.5
+        gate_tau, agg_tau = engine.attack_thresholds[zone.zone_id]  # 4.2
         if raw_move is not None:
             # 2.6: gate evidence replaces the aggregate path for this frame;
             # the channel counts as gated iff its own gates are elevated
@@ -154,6 +159,9 @@ def ingest_frame(engine: ConductorEngine, frame: SensorFrame, now: float | None)
             zst.move_gated = raw_move > 0.0
             zst.move_from_gates = True
             zst.z_move = centered(raw_move, zst.stat_cal.get("move_gate"), len(owned), t)
+            # 4.2: candidacy is a tail event on the RAW statistic against
+            # the analytic threshold for this path's gate count.
+            zst.attack_candidate = raw_move >= gate_tau
         else:
             # 2.6: automatic per-frame fallback to the aggregate path.
             zst.move_gated = move_gated
@@ -167,6 +175,7 @@ def ingest_frame(engine: ConductorEngine, frame: SensorFrame, now: float | None)
                 onesided_z(move_e, zst.move_baseline) if move_gated and move_e is not None else 0.0
             )
             zst.z_move = centered(raw, zst.stat_cal.get("move_agg"), 1, t)
+            zst.attack_candidate = raw >= agg_tau  # 4.2 (raw = 0 if un-gated)
         if raw_still is not None:
             zst.still_gated = raw_still > 0.0  # 2.6
             zst.still_from_gates = True
@@ -184,9 +193,21 @@ def ingest_frame(engine: ConductorEngine, frame: SensorFrame, now: float | None)
 
 
 def apply_frame(engine: ConductorEngine, frame: SensorFrame, now: float) -> None:
-    """Frame-side evidence work: ingest, sensor caches, adaptation."""
-    energies = ingest_frame(engine, frame, now)
+    """Frame-side evidence work: freshness, ingest, sensor caches,
+    adaptation."""
     sensor = engine.state.sensors[frame.sensor_id]
+    # 4.2: the adapter re-emits the complete cached frame on ANY entity
+    # change, so only a *changed* move view carries a new move measurement
+    # (under ESPHome deduplication a changed value is exactly that).
+    move_view = (
+        frame.moving_distance_cm,
+        frame.move_energy,
+        frame.has_moving_target,
+        frame.gate_move,
+    )
+    sensor.move_fresh = move_view != sensor.move_view
+    sensor.move_view = move_view
+    energies = ingest_frame(engine, frame, now)
     move_e, still_e, gate_move, gate_still = energies
     # Caches feed the tick-aligned calibration rows (3.3); a None field
     # (never reported) keeps its previous value like the adapter's view.
@@ -320,11 +341,25 @@ def on_record_baseline(
     plan.start_timer(baseline_end(zone.zone_id), duration)  # 3.3
 
 
-def _stat_of(raws: list[float], t: Tunables) -> ChannelStats | None:
-    """Empirical ``(m0, s0)`` of the raw statistic over a window (3.7)."""
-    if len(raws) < 2:
+def _stat_of(raws: list[float], m: int, t: Tunables) -> StatBaseline | None:
+    """Empirical ``(m0, s0, c0)`` of the raw statistic over a window (3.7),
+    shrunk toward safety.
+
+    A short window estimates a scale poorly, and an underestimated ``s0``
+    inflates every future score, so: at least ``stat_min_rows`` rows are
+    required (else the analytic fallback stays), and ``s0`` is floored by
+    the analytic reference deviation for the path's gate count — the
+    window may recentre the score but never sharpen it beyond Gaussian.
+    ``c0`` is the measured mean of the exact runtime transform (clamped
+    score) over the window, so the final score is mean-zero on H0 (3.2).
+    """
+    if len(raws) < max(2, t.stat_min_rows):
         return None
-    return ChannelStats(fmean(raws), max(t.stat_sigma_min, pstdev(raws)))
+    reference_s0 = stats.onesided_max_stats(m)[1]  # 3.7: safety floor
+    m0 = fmean(raws)
+    s0 = max(t.stat_sigma_min, reference_s0, pstdev(raws))
+    c0 = fmean(min(t.z_cap, max(-t.z_neg_cap, (raw - m0) / s0)) for raw in raws)
+    return StatBaseline(m0, s0, c0)
 
 
 def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Plan) -> None:
@@ -368,11 +403,12 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
     # centered score's empty-room mean is ~0 by construction. Full replace:
     # paths without rows fall back to the analytic values.
     zst.stat_cal = {}
-    for key, raws in (
-        ("move_agg", [onesided_z(e, zst.move_baseline) for e in move_samples]),
-        ("still_agg", [onesided_z(e, zst.still_baseline) for e in still_samples]),
+    for key, m, raws in (
+        ("move_agg", 1, [onesided_z(e, zst.move_baseline) for e in move_samples]),
+        ("still_agg", 1, [onesided_z(e, zst.still_baseline) for e in still_samples]),
         (
             "move_gate",
+            len(owned),
             [
                 s
                 for row in rows
@@ -382,6 +418,7 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
         ),
         (
             "still_gate",
+            len(owned),
             [
                 s
                 for row in rows
@@ -390,7 +427,7 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
             ],
         ),
     ):
-        stat = _stat_of(raws, t)
+        stat = _stat_of(raws, m, t)
         if stat is not None:
             zst.stat_cal[key] = stat
     zst.last_adapt_at = None  # new floor: re-anchor the adaptation EMA
