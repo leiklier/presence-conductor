@@ -3,11 +3,253 @@
     "step": {
       "user": {
         "title": "Presence Conductor",
-        "description": "Robust tilstedeværelsesestimering for mmWave-sensorer. Dette oppretter den ene Presence Conductor-oppføringen; kobling av sensorer til soner og rom konfigureres i en senere versjon."
+        "description": "Robust tilstedeværelsesestimering for mmWave-sensorer. Velg radarenhetene dirigenten skal estimere fra — du deler hver av dem inn i soner i de neste stegene.",
+        "data": {
+          "sensors": "Oppdagede sensorer",
+          "add_manual": "Legg til en sensor manuelt"
+        },
+        "data_description": {
+          "sensors": "Enheter som eksponerer LD2410-radarens entitetsklynge (bevegelses- og stillhetsenergi pluss avstand), funnet i entitetsregisteret ditt. Apollo MSR-2-enheter dukker opp her automatisk.",
+          "add_manual": "Slå på for å tilordne en sensors entiteter for hånd — for radarer med entiteter som ikke følger standardnavngivningen."
+        }
+      },
+      "manual_sensor": {
+        "title": "Manuell sensor",
+        "description": "Tilordne entitetene til én mmWave-enhet til rollene sine. Energier og begge avstander er påkrevd; de binære målentitetene er valgfrie og skjerper bare estimatet.",
+        "data": {
+          "name": "Sensornavn",
+          "move_energy": "Bevegelsesenergi",
+          "still_energy": "Stillhetsenergi",
+          "moving_distance": "Avstand til mål i bevegelse",
+          "still_distance": "Avstand til stille mål",
+          "detection_distance": "Deteksjonsavstand",
+          "target": "Mål",
+          "moving_target": "Mål i bevegelse",
+          "still_target": "Stille mål",
+          "add_another": "Legg til enda en sensor"
+        },
+        "data_description": {
+          "name": "Visningsnavn for enheten. Det blir også sensorens interne ID, så det må være unikt.",
+          "move_energy": "Radarens bevegelsesenergi (0–100).",
+          "still_energy": "Radarens stillhetsenergi (0–100).",
+          "moving_distance": "Avstand til målet i bevegelse, i cm.",
+          "still_distance": "Avstand til det stille målet, i cm.",
+          "detection_distance": "Samlet deteksjonsavstand, i cm (valgfri).",
+          "target": "Radarens binære tilstedeværelsesutgang (valgfri).",
+          "moving_target": "Binært flagg for mål i bevegelse (valgfritt).",
+          "still_target": "Binært flagg for stille mål (valgfritt).",
+          "add_another": "Slå på for å tilordne enda en sensor etter denne."
+        }
+      },
+      "zones": {
+        "title": "Sone {zone_number} for {sensor} (sensor {sensor_number} av {sensor_count})",
+        "description": "En sone er et avstandsutsnitt av denne sensorens stråle og estimeringsenheten. Standard er én sone som dekker hele rekkevidden; gi den rommet den hører til. Soner fra ulike sensorer som deler rom, smeltes sammen til én romtilstedeværelse.",
+        "data": {
+          "name": "Sonenavn",
+          "room": "Rom",
+          "near_cm": "Nær kant",
+          "far_cm": "Fjern kant",
+          "fallback": "Reservesone",
+          "add_another_zone": "Legg til enda en sone for denne sensoren"
+        },
+        "data_description": {
+          "name": "Visningsnavn for sonen. Det blir også sonens interne ID, så det må være unikt.",
+          "room": "Soner med samme romnavn smeltes sammen til én romtilstedeværelse — velg et område eller skriv et hvilket som helst navn. Samme tekst = samme rom.",
+          "near_cm": "Nærmeste avstand som hører til denne sonen, i cm.",
+          "far_cm": "Fjerneste avstand som hører til denne sonen, i cm (600 er radarens fulle rekkevidde).",
+          "fallback": "Bevis uten brukbar avstandsmåling tilskrives denne sonen. Maks én per sensor; uten en brukes sensorens nærmeste sone.",
+          "add_another_zone": "Slå på for å skjære ut enda en sone av denne sensorens rekkevidde."
+        }
+      },
+      "overlap": {
+        "title": "Overlappende soner",
+        "description": "Soner fra ulike sensorer overlapper i samme rom:\n\n{overlaps}\n\nSeparasjon i samme rom hviler på ikke-overlappende avstandsintervaller — overlapp betyr at begge sensorene vil gjøre krav på samme mål. Dette er en advarsel, ikke en feil: send inn for å beholde konfigurasjonen likevel, eller juster den senere via Konfigurer."
       }
     },
+    "error": {
+      "no_sensors_selected": "Velg minst én sensor, eller slå på manuell tilordning.",
+      "invalid_sensor_name": "Sensornavnet må inneholde minst én bokstav eller ett siffer.",
+      "duplicate_sensor_name": "En annen sensor bruker allerede dette navnet. Sensornavn må være unike.",
+      "invalid_zone_name": "Sonenavnet må inneholde minst én bokstav eller ett siffer.",
+      "duplicate_zone_name": "En annen sone bruker allerede dette navnet. Sonenavn må være unike.",
+      "invalid_room_name": "Romnavnet må inneholde minst én bokstav eller ett siffer.",
+      "invalid_zone_range": "Den fjerne kanten må være større enn den nære kanten.",
+      "multiple_fallback_zones": "Denne sensoren har allerede en reservesone. Maks én sone per sensor kan være reserve."
+    },
     "abort": {
-      "single_instance_allowed": "Presence Conductor er allerede satt opp. Kun én instans støttes."
+      "single_instance_allowed": "Presence Conductor er allerede satt opp. Kun én instans støttes — bruk Konfigurer på den eksisterende oppføringen i stedet."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Alternativer for Presence Conductor",
+        "description": "Velg en seksjon å redigere. Endringer trer i kraft når seksjonen lagres; innspilte grunnlinjer bevares.",
+        "menu_options": {
+          "sensors": "Sensorer — legg til eller fjern mmWave-enheter",
+          "zones": "Soner — rom, avstandsutsnitt, reserve",
+          "tunables": "Justeringer — bevisvekter, terskler, tider"
+        }
+      },
+      "sensors": {
+        "title": "Sensorer",
+        "description": "Konfigurerte sensorer er forhåndsvalgt; fjern markeringen for å fjerne dem (sonene deres fjernes også). Nyoppdagede enheter vises umarkert — velg dem for å legge dem til; du definerer sonene deres etterpå.",
+        "data": {
+          "sensors": "Sensorer",
+          "add_manual": "Legg til en sensor manuelt"
+        },
+        "data_description": {
+          "sensors": "Konfigurerte sensorer og nyoppdagede radarenheter.",
+          "add_manual": "Slå på for å tilordne en sensors entiteter for hånd."
+        }
+      },
+      "manual_sensor": {
+        "title": "Manuell sensor",
+        "description": "Tilordne entitetene til én mmWave-enhet til rollene sine. Energier og begge avstander er påkrevd; de binære målentitetene er valgfrie og skjerper bare estimatet.",
+        "data": {
+          "name": "Sensornavn",
+          "move_energy": "Bevegelsesenergi",
+          "still_energy": "Stillhetsenergi",
+          "moving_distance": "Avstand til mål i bevegelse",
+          "still_distance": "Avstand til stille mål",
+          "detection_distance": "Deteksjonsavstand",
+          "target": "Mål",
+          "moving_target": "Mål i bevegelse",
+          "still_target": "Stille mål",
+          "add_another": "Legg til enda en sensor"
+        },
+        "data_description": {
+          "name": "Visningsnavn for enheten. Det blir også sensorens interne ID, så det må være unikt.",
+          "move_energy": "Radarens bevegelsesenergi (0–100).",
+          "still_energy": "Radarens stillhetsenergi (0–100).",
+          "moving_distance": "Avstand til målet i bevegelse, i cm.",
+          "still_distance": "Avstand til det stille målet, i cm.",
+          "detection_distance": "Samlet deteksjonsavstand, i cm (valgfri).",
+          "target": "Radarens binære tilstedeværelsesutgang (valgfri).",
+          "moving_target": "Binært flagg for mål i bevegelse (valgfritt).",
+          "still_target": "Binært flagg for stille mål (valgfritt).",
+          "add_another": "Slå på for å tilordne enda en sensor etter denne."
+        }
+      },
+      "new_zones": {
+        "title": "Sone {zone_number} for {sensor} (ny sensor {sensor_number} av {sensor_count})",
+        "description": "Definer sonene til den nylig tillagte sensoren. Standard er én sone som dekker hele rekkevidden; gi den rommet den hører til.",
+        "data": {
+          "name": "Sonenavn",
+          "room": "Rom",
+          "near_cm": "Nær kant",
+          "far_cm": "Fjern kant",
+          "fallback": "Reservesone",
+          "add_another_zone": "Legg til enda en sone for denne sensoren"
+        },
+        "data_description": {
+          "name": "Visningsnavn for sonen. Det blir også sonens interne ID, så det må være unikt.",
+          "room": "Soner med samme romnavn smeltes sammen til én romtilstedeværelse — velg et område eller skriv et hvilket som helst navn. Samme tekst = samme rom.",
+          "near_cm": "Nærmeste avstand som hører til denne sonen, i cm.",
+          "far_cm": "Fjerneste avstand som hører til denne sonen, i cm (600 er radarens fulle rekkevidde).",
+          "fallback": "Bevis uten brukbar avstandsmåling tilskrives denne sonen. Maks én per sensor; uten en brukes sensorens nærmeste sone.",
+          "add_another_zone": "Slå på for å skjære ut enda en sone av denne sensorens rekkevidde."
+        }
+      },
+      "zones": {
+        "title": "Sone {zone_number} av {zone_count}: {zone}",
+        "description": "Juster denne sonens rom og avstandsutsnitt. Gjeldende innstillinger er forhåndsutfylt; innspilte grunnlinjer bevares.",
+        "data": {
+          "room": "Rom",
+          "near_cm": "Nær kant",
+          "far_cm": "Fjern kant",
+          "fallback": "Reservesone"
+        },
+        "data_description": {
+          "room": "Soner med samme romnavn smeltes sammen til én romtilstedeværelse — velg et område eller skriv et hvilket som helst navn. Samme tekst = samme rom.",
+          "near_cm": "Nærmeste avstand som hører til denne sonen, i cm.",
+          "far_cm": "Fjerneste avstand som hører til denne sonen, i cm (600 er radarens fulle rekkevidde).",
+          "fallback": "Bevis uten brukbar avstandsmåling tilskrives denne sonen. Maks én per sensor; uten en brukes sensorens nærmeste sone."
+        }
+      },
+      "overlap": {
+        "title": "Overlappende soner",
+        "description": "Soner fra ulike sensorer overlapper i samme rom:\n\n{overlaps}\n\nSeparasjon i samme rom hviler på ikke-overlappende avstandsintervaller — overlapp betyr at begge sensorene vil gjøre krav på samme mål. Dette er en advarsel, ikke en feil: send inn for å lagre likevel."
+      },
+      "tunables": {
+        "title": "Justeringer",
+        "description": "Atferdsjusteringer for estimeringsmotoren. Standardverdiene speiler docs/ENGINE_SPEC.md; gjeldende verdier er forhåndsutfylt.",
+        "data": {
+          "margin_cm": "Avstandsmargin",
+          "stale_after": "Foreldet etter",
+          "tick_interval": "Tikkintervall",
+          "sigma_min": "Sigma-gulv",
+          "default_mu": "Standard grunnlinjegjennomsnitt",
+          "default_sigma": "Standard grunnlinjesigma",
+          "z_cap": "Bevistak",
+          "k_move": "Bevegelsesvekt",
+          "k_still": "Stillhetsvekt",
+          "k_absence": "Fraværsvekt",
+          "tau_decay": "Henfallstidskonstant",
+          "p_prior": "Tom-prior",
+          "z_attack": "Angrepsterskel",
+          "p_attack": "Angrepssannsynlighet",
+          "theta_on": "På-terskel for opptatt",
+          "theta_off": "Av-terskel for opptatt",
+          "z_motion": "Bevegelsesterskel",
+          "motion_hold": "Bevegelseshold",
+          "p_min": "Sannsynlighetsgulv",
+          "p_max": "Sannsynlighetstak",
+          "p_background": "Sannsynlighetsport for bakgrunn",
+          "t_background": "Bakgrunnsforsinkelse",
+          "tau_background": "Bakgrunnstidskonstant",
+          "baseline_duration": "Grunnlinjevarighet",
+          "t_dwell": "Oppholdstid",
+          "t_settle": "Ro-tid",
+          "tau_home": "Hjemme-henfallstidskonstant",
+          "theta_home_on": "På-terskel for noen hjemme",
+          "theta_home_off": "Av-terskel for noen hjemme"
+        },
+        "data_description": {
+          "margin_cm": "Slakk i sonemasken som absorberer radarens interpolerte avstandsutjevning.",
+          "stale_after": "Stillhetsvindu før en opptatt sensors soner går til ukjent helse.",
+          "tick_interval": "Forventet tikkfrekvens som driver henfall, opphold og hold.",
+          "sigma_min": "Den kalibrerte støygulv-sigmaen går aldri under dette (normaliserte energienheter).",
+          "default_mu": "Grunnlinjegjennomsnitt brukt for soner uten innspilt grunnlinje.",
+          "default_sigma": "Grunnlinjesigma brukt for soner uten innspilt grunnlinje.",
+          "z_cap": "Tak per kanal på bevispoengsummen, slik at én ramme aldri kan overvelde filteret.",
+          "k_move": "Bevisvekt per sekund for bevegelseskanalen.",
+          "k_still": "Bevisvekt per sekund for stillhetskanalen.",
+          "k_absence": "Bevis per sekund mot tilstedeværelse mens begge kanaler ligger på grunnlinjen.",
+          "tau_decay": "Avslapningstidskonstant for posterioren mot tom-prioren (avreisehasarden — det finnes ingen fast tidsavbrudd for tilstedeværelse).",
+          "p_prior": "Prior sannsynlighet for tom tilstand som posterioren henfaller mot.",
+          "z_attack": "Bevegelsesbevispoengsum som utløser hurtigangrepet.",
+          "p_attack": "Sannsynlighetsgulv som anvendes umiddelbart ved hurtigangrep (lys-på-stien).",
+          "theta_on": "Opptatt slås på ved denne sannsynligheten.",
+          "theta_off": "Opptatt slås av ved denne sannsynligheten; mellom tersklene holdes tilstanden.",
+          "z_motion": "Bevegelsesbevispoengsum som slår på den rå bevegelsesutgangen.",
+          "motion_hold": "Hvor lenge bevegelse holder seg på etter siste bevegelsesbevis.",
+          "p_min": "Nedre posteriorklemme, slik at lang tomhet ikke kan bygge ubegrenset treghet.",
+          "p_max": "Øvre posteriorklemme, slik at lang tilstedeværelse ikke kan bygge ubegrenset treghet.",
+          "p_background": "Bakgrunnstilpasning kjører bare mens sonens posterior holder seg under dette.",
+          "t_background": "Hvor lenge posterioren må holde seg under porten før tilpasningen starter.",
+          "tau_background": "EMA-tidskonstant for den langsomme bakgrunnstilpasningen.",
+          "baseline_duration": "Standard innsamlingsvindu for en grunnlinjeinnspilling.",
+          "t_dwell": "Sammenhengende tilstedeværelse som kreves før passerende blir aktiv.",
+          "t_settle": "Stillhetskanaldominans som kreves før sonen regnes som i ro.",
+          "tau_home": "Henfallstidskonstant for noen-hjemme når alle soner er tomme — bevisst langsom, siden sensorene ikke dekker alle rom.",
+          "theta_home_on": "Noen hjemme slås på ved denne sannsynligheten.",
+          "theta_home_off": "Noen hjemme slås av ved denne sannsynligheten."
+        }
+      }
+    },
+    "error": {
+      "no_sensors_selected": "Velg minst én sensor, eller slå på manuell tilordning.",
+      "invalid_sensor_name": "Sensornavnet må inneholde minst én bokstav eller ett siffer.",
+      "duplicate_sensor_name": "En annen sensor bruker allerede dette navnet. Sensornavn må være unike.",
+      "invalid_zone_name": "Sonenavnet må inneholde minst én bokstav eller ett siffer.",
+      "duplicate_zone_name": "En annen sone bruker allerede dette navnet. Sonenavn må være unike.",
+      "invalid_room_name": "Romnavnet må inneholde minst én bokstav eller ett siffer.",
+      "invalid_zone_range": "Den fjerne kanten må være større enn den nære kanten.",
+      "multiple_fallback_zones": "Denne sensoren har allerede en reservesone. Maks én sone per sensor kan være reserve."
+    },
+    "abort": {
+      "no_zones_configured": "Det finnes ingen soner å redigere. Legg til sensorer først."
     }
   }
 }
