@@ -26,18 +26,23 @@ from .core.model import (
     GateBaselines,
     RoomConfig,
     SensorConfig,
+    StatBaseline,
     Tunables,
     ZoneBaselines,
     ZoneConfig,
 )
 
-_TUNABLE_FIELDS = frozenset(f.name for f in fields(Tunables))
+_TUNABLE_TYPES = {f.name: type(f.default) for f in fields(Tunables)}
 
 
 def build_tunables(options: Mapping[str, Any]) -> Tunables:
-    """Stored tunables over the dataclass defaults; unknown keys ignored."""
+    """Stored tunables over the dataclass defaults; unknown keys ignored.
+
+    Values are cast to the field's default type (``attack_confirm`` is an
+    int; number selectors hand back floats).
+    """
     stored = options.get(CONF_TUNABLES) or {}
-    return Tunables(**{k: float(v) for k, v in stored.items() if k in _TUNABLE_FIELDS})
+    return Tunables(**{k: _TUNABLE_TYPES[k](v) for k, v in stored.items() if k in _TUNABLE_TYPES})
 
 
 def build_config(options: Mapping[str, Any]) -> ConductorConfig:
@@ -102,6 +107,13 @@ def baselines_from_options(options: Mapping[str, Any]) -> dict[str, ZoneBaseline
                     still_sigma=float(g["still_sigma"]),
                 )
                 for index, g in (b.get("gates") or {}).items()
+            },
+            # Rule 3.7: optional statistic calibration. Baselines stored
+            # before 3.7 have no "stats" key and fall back to the analytic
+            # values.
+            stats={
+                key: StatBaseline(mu=float(s["mu"]), sigma=float(s["sigma"]))
+                for key, s in (b.get("stats") or {}).items()
             },
         )
         for zone_id, b in raw.items()

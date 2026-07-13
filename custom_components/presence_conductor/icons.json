@@ -57,13 +57,13 @@
           "settled": "mdi:sofa"
         }
       },
-      "zone_probability": {
+      "zone_confidence": {
         "default": "mdi:gauge"
       },
-      "room_probability": {
+      "room_confidence": {
         "default": "mdi:gauge"
       },
-      "home_probability": {
+      "home_confidence": {
         "default": "mdi:home-percent-outline"
       },
       "zone_dwell": {

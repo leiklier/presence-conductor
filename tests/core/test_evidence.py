@@ -5,10 +5,22 @@ from __future__ import annotations
 import pytest
 
 from custom_components.presence_conductor.core import timers
+from custom_components.presence_conductor.core.belief import advance
 from custom_components.presence_conductor.core.events import RecordBaseline
 from custom_components.presence_conductor.core.evidence import robust_stats
 
-from .harness import DESK, DOOR, KONTOR, MU, SOFAKROK, Harness, make_config, make_snapshot
+from .harness import (
+    DESK,
+    DOOR,
+    KONTOR,
+    MU,
+    SOFAKROK,
+    Z_EMPTY,
+    Harness,
+    make_config,
+    make_snapshot,
+    quiet,
+)
 
 
 class TestRule31RobustStats:
@@ -27,41 +39,61 @@ class TestRule31RobustStats:
 class TestRule32EvidenceScore:
     def test_rule_3_2_z_capped_at_z_cap(self) -> None:
         h = Harness()
-        h.send_frame(KONTOR, still_d=100, still_e=100)
+        h.send_frame(KONTOR, still_d=100, still_e=100, still=True)
         assert h.zone(DESK).z_still == pytest.approx(6.0)  # z_cap
 
-    def test_rule_3_2_llr_weights_integrated_per_tick(self) -> None:
+    def test_rule_3_2_weights_shape_the_evidence_rate(self) -> None:
         h = Harness()
-        h.send_frame(SOFAKROK, still_d=100, still_e=35)  # z_still = 6
+        h.send_frame(SOFAKROK, still_d=100, still_e=35, still=True)  # z_still = 6
         h.tick()
-        # decay(prior) == prior, so one tick adds k_still * z_still * dt.
-        expected = h.engine.lam_prior + 0.6 * 6.0
+        # 4.1: exact constant-input update over dt = 1 with
+        # u = k_still * 6 + k_move * Z_EMPTY - k_bias.
+        t = h.config.tunables
+        u = min(t.u_cap, t.k_still * 6.0 + t.k_move * Z_EMPTY - t.k_bias)
+        expected = advance(h.engine.lam_prior, h.engine.lam_prior, u, 1.0, 90.0)
         assert h.zone("sofakrok_zone").lam == pytest.approx(expected)
 
-    def test_rule_3_2_absence_applies_when_both_channels_at_baseline(self) -> None:
+    def test_rule_3_2_bias_applies_always(self) -> None:
+        # A zone that has never seen a frame (scores 0 = at the empty mean)
+        # still integrates -k_bias: expected empty evidence is negative.
         h = Harness()
         h.tick()
-        assert h.zone(DESK).lam == pytest.approx(h.engine.lam_prior - 0.4)
+        expected = advance(h.engine.lam_prior, h.engine.lam_prior, -0.4, 1.0, 90.0)
+        assert h.zone(DESK).lam == pytest.approx(expected)
+        # And a zone at the measured noise floor drives down even harder.
+        h.submit(quiet(KONTOR))
+        h.tick()
+        assert h.zone(DESK).lam < expected
 
-    def test_rule_3_2_absence_not_applied_while_evidence_present(self) -> None:
+    def test_rule_3_2_clear_still_evidence_outweighs_the_bias(self) -> None:
         h = Harness()
-        h.send_frame(SOFAKROK, still_d=100, still_e=10)  # z_still = 1
+        h.send_frame(SOFAKROK, still_d=100, still_e=20, still=True)  # z = 4.45
         h.tick()
         assert h.zone("sofakrok_zone").lam > h.engine.lam_prior
+
+    def test_rule_3_2_marginal_still_evidence_is_net_negative(self) -> None:
+        # Raw z = 1 is barely above what empty noise produces (E[max(0,Z)]
+        # = 0.4): after centering it no longer holds a zone up on its own.
+        h = Harness()
+        h.send_frame(SOFAKROK, still_d=100, still_e=10, still=True)
+        h.tick()
+        assert h.zone("sofakrok_zone").lam < h.engine.lam_prior
 
 
 class TestRule33BaselineCalibration:
     def test_rule_3_3_record_baseline_replaces_stats_robustly(self) -> None:
         h = Harness()
-        h.submit(RecordBaseline(DESK, duration=30.0))
-        assert h.deadlines[timers.baseline_end(DESK)] == pytest.approx(30.0)
+        h.submit(RecordBaseline(DESK, duration=20.0))
+        assert h.deadlines[timers.baseline_end(DESK)] == pytest.approx(20.0)
         raw = [8, 9, 10, 11, 12] * 4
         raw[3] = 90  # a person walks through: brief violations don't poison
         raw[11] = 95
         for value in raw:
+            # 3.3: rows are sampled on the tick clock from the held values,
+            # so each 1 Hz frame is captured by the following tick.
             h.send_frame(KONTOR, move_e=value, still_e=value)
             h.step_to(h.now + 1.0)
-        h.run(15)  # window closes at t=30 during this run
+        h.run(5)  # window closed at t=20
         desk = h.zone(DESK)
         assert desk.recording is None
         assert desk.move_baseline.mu == pytest.approx(0.10, abs=0.011)

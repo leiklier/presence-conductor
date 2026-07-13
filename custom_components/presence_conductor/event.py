@@ -1,7 +1,7 @@
 """Pass-by event entities (spec rule 5.2).
 
 A zone traversed without dwelling emits ``pass_by`` with the zone's peak
-probability and traversal duration. The same payload is fired on the HA bus
+confidence and traversal duration. The same payload is fired on the HA bus
 as ``presence_conductor_pass_by`` for automations; the entities are the
 dashboard/logbook surface. Each room carries one aggregating entity — it
 fires for every member zone's pass-by, carrying the zone id — and each zone
@@ -73,7 +73,7 @@ class ZonePassByEvent(ConductorEntity, EventEntity):
         self._trigger_event(
             EVENT_TYPE_PASS_BY,
             {
-                "peak_probability": round(event.peak_probability, 4),
+                "peak_confidence": round(event.peak_confidence, 4),
                 "duration": round(event.duration, 2),
             },
         )
@@ -113,7 +113,7 @@ class RoomPassByEvent(ConductorEntity, EventEntity):
             EVENT_TYPE_PASS_BY,
             {
                 "zone_id": event.zone_id,
-                "peak_probability": round(event.peak_probability, 4),
+                "peak_confidence": round(event.peak_confidence, 4),
                 "duration": round(event.duration, 2),
             },
         )

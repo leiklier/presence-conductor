@@ -431,7 +431,7 @@ class PresenceConductorController:
                     EVENT_PASS_BY,
                     {
                         "zone_id": event.zone_id,
-                        "peak_probability": round(event.peak_probability, 4),
+                        "peak_confidence": round(event.peak_confidence, 4),
                         "duration": round(event.duration, 2),
                     },
                 )
@@ -512,6 +512,14 @@ class PresenceConductorController:
             }
             if gates:
                 record["gates"] = gates
+            # Rule 3.7: optional statistic calibration. Zones calibrated
+            # before 3.7 (or not at all) persist without it and score
+            # against the analytic fallback.
+            stats = {
+                key: {"mu": cal.mu, "sigma": cal.sigma} for key, cal in sorted(zst.stat_cal.items())
+            }
+            if stats:
+                record["stats"] = stats
             current[zone.zone_id] = record
         merged = {**stored, **current}
         if merged == stored:
@@ -534,7 +542,7 @@ def conductor_device_info(entry: ConfigEntry) -> DeviceInfo:
         identifiers={(DOMAIN, entry.entry_id)},
         name="Presence Conductor",
         manufacturer="Presence Conductor",
-        model="Bayesian mmWave occupancy estimator",
+        model="Calibrated mmWave occupancy estimator",
         entry_type=DeviceEntryType.SERVICE,
     )
 
@@ -552,7 +560,7 @@ def room_device_info(controller: PresenceConductorController, room_id: str) -> D
         identifiers={(DOMAIN, f"{controller.entry.entry_id}_room_{room_id}")},
         name=f"{room_name} presence",
         manufacturer="Presence Conductor",
-        model="Bayesian mmWave occupancy estimator",
+        model="Calibrated mmWave occupancy estimator",
         suggested_area=room_name,
         via_device=(DOMAIN, controller.entry.entry_id),
         entry_type=DeviceEntryType.SERVICE,

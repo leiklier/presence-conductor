@@ -181,12 +181,14 @@ async def set_states(hass: HomeAssistant, states: dict[str, str]) -> None:
     await hass.async_block_till_done()
 
 
-async def enter_zone(hass: HomeAssistant, cluster: dict[str, str], distance: str) -> None:
+async def enter_zone(hass: HomeAssistant, freezer, cluster: dict[str, str], distance: str) -> None:
     """A person appears: strong move energy at a gated distance.
 
     The distance moves first: every entity change coalesces a full frame
     (rule 1.1), so energy-first would produce one frame crediting the strong
-    energy to whatever stale distance the cache still holds.
+    energy to whatever stale distance the cache still holds. The fast attack
+    (4.2) needs a *second* qualifying frame a radar interval later, so a
+    fresh energy reading follows after 0.3 s.
     """
     await set_states(
         hass,
@@ -197,6 +199,8 @@ async def enter_zone(hass: HomeAssistant, cluster: dict[str, str], distance: str
             cluster["target"]: "on",
         },
     )
+    await advance(hass, freezer, 0.3)
+    await set_states(hass, {cluster["move_energy"]: "81.0"})
 
 
 async def leave_zone(hass: HomeAssistant, cluster: dict[str, str]) -> None:
@@ -223,8 +227,9 @@ async def test_walk_through_produces_pass_by_and_no_settle(hass: HomeAssistant, 
     captured = async_capture_events(hass, EVENT_PASS_BY)
     assert hass.states.get(OCC_SOFAKROK).state == "off"
 
-    await enter_zone(hass, SOFAKROK, "150.0")
-    # Rule 4.2: the fast attack fires on the frame itself, no tick needed.
+    await enter_zone(hass, freezer, SOFAKROK, "150.0")
+    # Rule 4.2: the confirmed fast attack fires on the frame itself, no
+    # tick needed.
     assert hass.states.get(OCC_SOFAKROK).state == "on"
     assert hass.states.get("binary_sensor.presence_conductor_sofakrok_motion").state == "on"
     assert hass.states.get("sensor.presence_conductor_sofakrok_activity").state == "passing"
@@ -245,12 +250,12 @@ async def test_walk_through_produces_pass_by_and_no_settle(hass: HomeAssistant, 
     assert len(captured) == 1
     payload = captured[0].data
     assert payload["zone_id"] == "sofakrok"
-    assert payload["peak_probability"] >= 0.9
+    assert payload["peak_confidence"] >= 0.9
     assert 1.0 <= payload["duration"] <= 15.0
     event_state = hass.states.get("event.presence_conductor_sofakrok_pass_by")
     assert event_state.state != "unknown"
     assert event_state.attributes["event_type"] == "pass_by"
-    assert event_state.attributes["peak_probability"] >= 0.9
+    assert event_state.attributes["peak_confidence"] >= 0.9
     # The room-level event entity fired too, naming the traversed zone.
     room_event = hass.states.get("event.presence_conductor_stue_room_pass_by")
     assert room_event.state != "unknown"
@@ -265,7 +270,7 @@ async def test_still_person_settles_the_room(hass: HomeAssistant, freezer) -> No
     """Still-channel dominance for t_settle promotes to SETTLED (rule 5.1)."""
     _entry, _controller = await setup_e2e(hass)
 
-    await enter_zone(hass, KONTOR, "100.0")
+    await enter_zone(hass, freezer, KONTOR, "100.0")
     assert hass.states.get(OCC_KONTOR_PULT).state == "on"
 
     # They sit down: move evidence gone, still energy holds the zone.
@@ -301,7 +306,7 @@ async def test_occupied_sensor_dropout_bridges_through_unknown(
     """Rule 1.3: silence while occupied -> UNKNOWN (unavailable), not off."""
     _entry, _controller = await setup_e2e(hass)
 
-    await enter_zone(hass, KONTOR, "100.0")
+    await enter_zone(hass, freezer, KONTOR, "100.0")
     assert hass.states.get(OCC_KONTOR_PULT).state == "on"
 
     # The sensor falls silent while the zone is occupied. The posterior is
@@ -319,7 +324,7 @@ async def test_occupied_sensor_dropout_bridges_through_unknown(
     assert hass.states.get(ANYONE_HOME).state == "on"
 
     # Recovery is immediate on the next frame (1.3) — outputs were held.
-    await set_states(hass, {KONTOR["move_energy"]: "81.0"})
+    await set_states(hass, {KONTOR["move_energy"]: "82.0"})
     assert hass.states.get(OCC_KONTOR_PULT).state == "on"
     assert hass.states.get(OCC_ROOM_KONTOR).state == "on"
 
@@ -388,7 +393,7 @@ async def test_disable_freezes_outputs_and_swallows_events(hass: HomeAssistant, 
 
     # A full walk-through while disabled: the engine tracks it underneath,
     # the entities never move, and the pass_by is swallowed.
-    await enter_zone(hass, SOFAKROK, "150.0")
+    await enter_zone(hass, freezer, SOFAKROK, "150.0")
     assert controller.state.zones["sofakrok"].occupied is True  # warm underneath
     assert hass.states.get(OCC_SOFAKROK).state == "off"  # frozen for consumers
     await leave_zone(hass, SOFAKROK)
@@ -399,7 +404,7 @@ async def test_disable_freezes_outputs_and_swallows_events(hass: HomeAssistant, 
 
     # Someone is present when the operator re-enables: one publish catches
     # every entity up with reality.
-    await enter_zone(hass, KONTOR, "100.0")
+    await enter_zone(hass, freezer, KONTOR, "100.0")
     assert hass.states.get(OCC_KONTOR_PULT).state == "off"  # still frozen
     await hass.services.async_call(
         "switch", "turn_on", {"entity_id": ENABLED_SWITCH}, blocking=True
@@ -410,7 +415,7 @@ async def test_disable_freezes_outputs_and_swallows_events(hass: HomeAssistant, 
     assert hass.states.get(STATE_SENSOR).state == "enabled"
 
     # And events flow again: a fresh walk-through emits its pass_by.
-    await enter_zone(hass, SOFAKROK, "150.0")
+    await enter_zone(hass, freezer, SOFAKROK, "150.0")
     await leave_zone(hass, SOFAKROK)
     for _ in range(15):
         await advance(hass, freezer, 1.0)
@@ -463,7 +468,7 @@ def seed_gated_world(hass: HomeAssistant) -> None:
             hass.states.async_set(entity_id, "0.0")
 
 
-async def test_gate_evidence_end_to_end(hass: HomeAssistant) -> None:
+async def test_gate_evidence_end_to_end(hass: HomeAssistant, freezer) -> None:
     """Spec 2.4-2.6 through the real seam: gate entities drive occupancy
     spatially, and an engineering-mode dropout falls back per frame."""
     seed_gated_world(hass)
@@ -485,6 +490,8 @@ async def test_gate_evidence_end_to_end(hass: HomeAssistant) -> None:
             GATED_CLUSTER["moving_target"]: "on",
         },
     )
+    await advance(hass, freezer, 0.3)
+    await set_states(hass, {GATED_CLUSTER["g3_move"]: "81.0"})  # 4.2 confirm
     assert hass.states.get(occ_far).state == "on"  # 2.5 + 4.2
     assert hass.states.get(occ_near).state == "off"  # aggregate path ignored
 
@@ -495,6 +502,8 @@ async def test_gate_evidence_end_to_end(hass: HomeAssistant) -> None:
         hass,
         {GATED_CLUSTER[role]: "unknown" for role in GATE_ROLES},
     )
+    await advance(hass, freezer, 0.3)
+    await set_states(hass, {GATED_CLUSTER["move_energy"]: "81.0"})  # 4.2 confirm
     assert hass.states.get(occ_near).state == "on"  # fallback, per frame
     assert hass.states.get(occ_far).state != "unavailable"
 
@@ -506,9 +515,9 @@ async def test_full_entity_inventory(hass: HomeAssistant) -> None:
     entry, _controller = await setup_e2e(hass)
     registry = er.async_get(hass)
     entries = er.async_entries_for_config_entry(registry, entry.entry_id)
-    # Per zone: occupancy, motion, activity, probability, dwell, pass-by
+    # Per zone: occupancy, motion, activity, confidence, dwell, pass-by
     # event, record-baseline button. Per room: occupancy, motion, settled,
-    # activity, probability, pass-by event. Home: anyone_home + probability.
+    # activity, confidence, pass-by event. Home: anyone_home + confidence.
     # Plus enabled + state.
     assert len(entries) == 5 * 7 + 3 * 6 + 4
 
@@ -517,7 +526,7 @@ async def test_full_entity_inventory(hass: HomeAssistant) -> None:
             f"binary_sensor.presence_conductor_{zone_id}_occupancy",
             f"binary_sensor.presence_conductor_{zone_id}_motion",
             f"sensor.presence_conductor_{zone_id}_activity",
-            f"sensor.presence_conductor_{zone_id}_probability",
+            f"sensor.presence_conductor_{zone_id}_confidence",
             f"sensor.presence_conductor_{zone_id}_dwell",
             f"event.presence_conductor_{zone_id}_pass_by",
             f"button.presence_conductor_{zone_id}_record_baseline",
@@ -529,13 +538,13 @@ async def test_full_entity_inventory(hass: HomeAssistant) -> None:
             f"binary_sensor.presence_conductor_{room_id}_room_motion",
             f"binary_sensor.presence_conductor_{room_id}_room_settled",
             f"sensor.presence_conductor_{room_id}_room_activity",
-            f"sensor.presence_conductor_{room_id}_room_probability",
+            f"sensor.presence_conductor_{room_id}_room_confidence",
             f"event.presence_conductor_{room_id}_room_pass_by",
         ):
             assert hass.states.get(entity_id) is not None, entity_id
     for entity_id in (
         ANYONE_HOME,
-        "sensor.presence_conductor_home_probability",
+        "sensor.presence_conductor_home_confidence",
         ENABLED_SWITCH,
         STATE_SENSOR,
     ):
@@ -631,7 +640,7 @@ async def test_two_sensors_cross_covering_two_rooms(hass: HomeAssistant, freezer
     assert hass.states.get(occ_spisebord).attributes["zones"] == ["a_spisebord", "b_spisebord"]
 
     # Evidence at sensor A, 100 cm: A's sofakrok slice -> sofakrok occupied.
-    await enter_zone(hass, CROSS_A, "100.0")
+    await enter_zone(hass, freezer, CROSS_A, "100.0")
     assert hass.states.get(occ_sofakrok).state == "on"
     assert hass.states.get(occ_spisebord).state == "off"  # gated out (2.1)
 
@@ -641,7 +650,7 @@ async def test_two_sensors_cross_covering_two_rooms(hass: HomeAssistant, freezer
     assert hass.states.get(occ_sofakrok).state == "off"
 
     # Evidence at sensor B, 300 cm: B's *far* slice is the same room.
-    await enter_zone(hass, CROSS_B, "300.0")
+    await enter_zone(hass, freezer, CROSS_B, "300.0")
     assert hass.states.get(occ_sofakrok).state == "on"
     assert hass.states.get(occ_spisebord).state == "off"
 
@@ -649,6 +658,6 @@ async def test_two_sensors_cross_covering_two_rooms(hass: HomeAssistant, freezer
     await leave_zone(hass, CROSS_B)
     for _ in range(15):
         await advance(hass, freezer, 1.0)
-    await enter_zone(hass, CROSS_B, "100.0")
+    await enter_zone(hass, freezer, CROSS_B, "100.0")
     assert hass.states.get(occ_spisebord).state == "on"
     assert hass.states.get(occ_sofakrok).state == "off"

@@ -71,13 +71,13 @@ async def test_zone_motion_mirrors_engine_state(hass: HomeAssistant, monkeypatch
 async def test_zone_entities_unavailable_while_health_unknown(
     hass: HomeAssistant, monkeypatch
 ) -> None:
-    """Rule 1.3: stale probability maps to unavailable, recovery restores."""
+    """Rule 1.3: stale confidence maps to unavailable, recovery restores."""
     entry, controller, fake = await setup_conductor(hass, monkeypatch)
     entity_ids = [
         entity_id_for(hass, "binary_sensor", f"{entry.entry_id}_zone_sofakrok_occupancy"),
         entity_id_for(hass, "binary_sensor", f"{entry.entry_id}_zone_sofakrok_motion"),
         entity_id_for(hass, "sensor", f"{entry.entry_id}_zone_sofakrok_activity"),
-        entity_id_for(hass, "sensor", f"{entry.entry_id}_zone_sofakrok_probability"),
+        entity_id_for(hass, "sensor", f"{entry.entry_id}_zone_sofakrok_confidence"),
         entity_id_for(hass, "sensor", f"{entry.entry_id}_zone_sofakrok_dwell"),
     ]
 
@@ -120,13 +120,13 @@ async def test_zone_activity_enum(hass: HomeAssistant, monkeypatch) -> None:
 
 
 @pytest.mark.usefixtures("entity_registry_enabled_by_default")
-async def test_zone_probability_and_dwell(hass: HomeAssistant, monkeypatch) -> None:
+async def test_zone_confidence_and_dwell(hass: HomeAssistant, monkeypatch) -> None:
     entry, controller, fake = await setup_conductor(hass, monkeypatch)
-    probability = entity_id_for(hass, "sensor", f"{entry.entry_id}_zone_sofakrok_probability")
+    confidence = entity_id_for(hass, "sensor", f"{entry.entry_id}_zone_sofakrok_confidence")
     dwell = entity_id_for(hass, "sensor", f"{entry.entry_id}_zone_sofakrok_dwell")
 
-    assert float(hass.states.get(probability).state) == pytest.approx(2.0)  # the prior
-    assert hass.states.get(probability).attributes["unit_of_measurement"] == "%"
+    assert float(hass.states.get(confidence).state) == pytest.approx(2.0)  # the prior
+    assert hass.states.get(confidence).attributes["unit_of_measurement"] == "%"
     assert hass.states.get(dwell).state == "0.0"
     assert hass.states.get(dwell).attributes["unit_of_measurement"] == "s"
 
@@ -134,7 +134,7 @@ async def test_zone_probability_and_dwell(hass: HomeAssistant, monkeypatch) -> N
     fake.state.zones["sofakrok"].dwell_seconds = 12.34
     async_dispatcher_send(hass, controller.signal)
     await hass.async_block_till_done()
-    assert float(hass.states.get(probability).state) == pytest.approx(50.0)
+    assert float(hass.states.get(confidence).state) == pytest.approx(50.0)
     assert hass.states.get(dwell).state == "12.3"
 
 
@@ -147,10 +147,10 @@ async def test_diagnostic_and_config_entity_categories(hass: HomeAssistant, monk
     def category(platform: str, unique_id: str):
         return registry.async_get(entity_id_for(hass, platform, unique_id)).entity_category
 
-    assert category("sensor", f"{entry.entry_id}_zone_sofakrok_probability") == diagnostic
+    assert category("sensor", f"{entry.entry_id}_zone_sofakrok_confidence") == diagnostic
     assert category("sensor", f"{entry.entry_id}_zone_sofakrok_dwell") == diagnostic
-    assert category("sensor", f"{entry.entry_id}_room_stue_probability") == diagnostic
-    assert category("sensor", f"{entry.entry_id}_home_probability") == diagnostic
+    assert category("sensor", f"{entry.entry_id}_room_stue_confidence") == diagnostic
+    assert category("sensor", f"{entry.entry_id}_home_confidence") == diagnostic
     assert category("sensor", f"{entry.entry_id}_state") == diagnostic
     assert category("switch", f"{entry.entry_id}_enabled") == er.EntityCategory.CONFIG
     assert (
@@ -173,7 +173,7 @@ async def test_room_entities_mirror_fusion(hass: HomeAssistant, monkeypatch) -> 
     motion = entity_id_for(hass, "binary_sensor", f"{entry.entry_id}_room_kontor_motion")
     settled = entity_id_for(hass, "binary_sensor", f"{entry.entry_id}_room_kontor_settled")
     activity = entity_id_for(hass, "sensor", f"{entry.entry_id}_room_kontor_activity")
-    probability = entity_id_for(hass, "sensor", f"{entry.entry_id}_room_kontor_probability")
+    confidence = entity_id_for(hass, "sensor", f"{entry.entry_id}_room_kontor_confidence")
     assert occupancy == "binary_sensor.presence_conductor_kontor_room_occupancy"
     assert motion == "binary_sensor.presence_conductor_kontor_room_motion"
 
@@ -189,14 +189,14 @@ async def test_room_entities_mirror_fusion(hass: HomeAssistant, monkeypatch) -> 
     room.motion = True
     room.settled = True
     room.activity = Activity.SETTLED
-    room.probability = 0.987
+    room.confidence = 0.987
     async_dispatcher_send(hass, controller.signal)
     await hass.async_block_till_done()
     assert hass.states.get(occupancy).state == "on"
     assert hass.states.get(motion).state == "on"
     assert hass.states.get(settled).state == "on"
     assert hass.states.get(activity).state == "settled"
-    assert float(hass.states.get(probability).state) == pytest.approx(98.7)
+    assert float(hass.states.get(confidence).state) == pytest.approx(98.7)
 
 
 async def test_room_entities_unavailable_when_fusion_unknown(
@@ -210,7 +210,7 @@ async def test_room_entities_unavailable_when_fusion_unknown(
     room.motion = None
     room.settled = None
     room.activity = None
-    room.probability = None
+    room.confidence = None
     async_dispatcher_send(hass, controller.signal)
     await hass.async_block_till_done()
     for unique_suffix, platform in (
@@ -218,7 +218,7 @@ async def test_room_entities_unavailable_when_fusion_unknown(
         ("motion", "binary_sensor"),
         ("settled", "binary_sensor"),
         ("activity", "sensor"),
-        ("probability", "sensor"),
+        ("confidence", "sensor"),
     ):
         entity_id = entity_id_for(hass, platform, f"{entry.entry_id}_room_kontor_{unique_suffix}")
         assert hass.states.get(entity_id).state == "unavailable", entity_id
@@ -229,10 +229,10 @@ async def test_room_entities_unavailable_when_fusion_unknown(
 # ---------------------------------------------------------------------------
 
 
-async def test_anyone_home_and_probability(hass: HomeAssistant, monkeypatch) -> None:
+async def test_anyone_home_and_confidence(hass: HomeAssistant, monkeypatch) -> None:
     entry, controller, fake = await setup_conductor(hass, monkeypatch)
     anyone = entity_id_for(hass, "binary_sensor", f"{entry.entry_id}_anyone_home")
-    probability = entity_id_for(hass, "sensor", f"{entry.entry_id}_home_probability")
+    confidence = entity_id_for(hass, "sensor", f"{entry.entry_id}_home_confidence")
     assert anyone == "binary_sensor.presence_conductor_anyone_home"
 
     state = hass.states.get(anyone)
@@ -240,19 +240,19 @@ async def test_anyone_home_and_probability(hass: HomeAssistant, monkeypatch) -> 
     assert state.attributes["device_class"] == "presence"
 
     fake.state.anyone_home = True
-    fake.state.home_probability = 0.964
+    fake.state.home_confidence = 0.964
     async_dispatcher_send(hass, controller.signal)
     await hass.async_block_till_done()
     assert hass.states.get(anyone).state == "on"
-    assert float(hass.states.get(probability).state) == pytest.approx(96.4)
+    assert float(hass.states.get(confidence).state) == pytest.approx(96.4)
 
     # Rule 6.5: all zones unhealthy -> anyone_home publishes unknown.
     fake.state.anyone_home = None
-    fake.state.home_probability = None
+    fake.state.home_confidence = None
     async_dispatcher_send(hass, controller.signal)
     await hass.async_block_till_done()
     assert hass.states.get(anyone).state == "unavailable"
-    assert hass.states.get(probability).state == "unavailable"
+    assert hass.states.get(confidence).state == "unavailable"
 
 
 # ---------------------------------------------------------------------------
@@ -409,9 +409,9 @@ async def test_entity_inventory_spans_hub_and_room_devices(
     entry, _controller, _fake = await setup_conductor(hass, monkeypatch)
     registry = er.async_get(hass)
     entries = er.async_entries_for_config_entry(registry, entry.entry_id)
-    # 3 zones x (occupancy, motion, activity, probability, dwell, pass-by,
+    # 3 zones x (occupancy, motion, activity, confidence, dwell, pass-by,
     # record baseline) + 2 rooms x (occupancy, motion, settled, activity,
-    # probability, pass-by) + anyone_home + home probability + enabled +
+    # confidence, pass-by) + anyone_home + home confidence + enabled +
     # state. Disabled-by-default zone entities are registered like the rest.
     assert len(entries) == 3 * 7 + 2 * 6 + 4
     # Hub + one device per room; the layout itself is tests/test_devices.py.

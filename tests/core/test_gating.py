@@ -14,6 +14,7 @@ from .harness import (
     SOFA,
     SOFAKROK,
     SPISEBORD,
+    Z_EMPTY,
     Harness,
     make_config,
     make_snapshot,
@@ -25,9 +26,9 @@ class TestRule21ZoneMask:
         h = Harness()
         h.send_frame(KONTOR, move_d=100, move_e=35, moving=True)
         assert h.zone(DESK).move_gated
-        assert h.zone(DESK).z_move == pytest.approx(6.0)  # (0.35-0.05)/0.05, capped
+        assert h.zone(DESK).z_move == pytest.approx(6.0)  # capped centered score
         assert not h.zone(DOOR).move_gated
-        assert h.zone(DOOR).z_move == 0.0
+        assert h.zone(DOOR).z_move == pytest.approx(Z_EMPTY)  # 3.2: absence
 
     def test_rule_2_1_margin_extends_the_interval(self) -> None:
         h = Harness()
@@ -60,16 +61,18 @@ class TestRule22SameRoomSeparation:
         h = Harness()
         h.occupy(SOFAKROK)
         assert h.zone(SOFA).occupied
-        assert h.zone(BORD).lam == pytest.approx(h.engine.lam_prior)
+        # 4.1: time passed during the confirmation, so BORD integrated
+        # absence — it may drift down, never up.
+        assert h.zone(BORD).lam <= h.engine.lam_prior
         assert not h.zone(BORD).occupied
         assert h.room("stue").occupied is True  # 6.1: either sensor suffices
 
     def test_rule_2_2_zones_of_one_sensor_are_separated_by_the_mask(self) -> None:
         h = Harness()
-        h.send_frame(KONTOR, move_d=250, move_e=35, moving=True)
+        h.occupy(KONTOR, distance=250)
         assert h.zone(DOOR).move_gated
         assert not h.zone(DESK).move_gated
-        assert h.zone(DOOR).occupied  # 4.2
+        assert h.zone(DOOR).occupied  # 4.2 (confirmed)
         assert not h.zone(DESK).occupied
 
 
@@ -78,6 +81,7 @@ class TestRule23FallbackAttribution:
         h = Harness()
         h.send_frame(KONTOR, move_d=None, move_e=35, moving=True)
         assert h.zone(DESK).move_gated  # desk is flagged fallback
+        h.send_frame(KONTOR, move_d=None, move_e=35, moving=True, at=h.now + 0.3)
         assert h.zone(DESK).occupied  # 4.2 rides on the attributed evidence
         assert not h.zone(DOOR).move_gated
 
@@ -98,22 +102,22 @@ class TestRule23FallbackAttribution:
         h = Harness()
         h.send_frame(KONTOR, move_d=None, move_e=35, moving=False)
         assert not h.zone(DESK).move_gated
-        assert h.zone(DESK).z_move == 0.0
+        assert h.zone(DESK).z_move == pytest.approx(Z_EMPTY)  # 3.2: absence
 
 
 class TestRule14UnitHygiene:
     def test_rule_1_4_energies_clamped_then_normalized(self) -> None:
         h = Harness()
-        h.send_frame(KONTOR, move_d=100, move_e=150)  # clamped to 100 -> 1.0
+        h.send_frame(KONTOR, move_d=100, move_e=150, moving=True)  # clamped to 100 -> 1.0
         assert h.zone(DESK).z_move == pytest.approx(6.0)  # capped at z_cap (3.2)
 
     def test_rule_1_4_negative_energy_clamps_to_zero(self) -> None:
         h = Harness()
-        h.send_frame(KONTOR, move_d=100, move_e=-5)
-        assert h.zone(DESK).z_move == 0.0
+        h.send_frame(KONTOR, move_d=100, move_e=-5, moving=True)
+        assert h.zone(DESK).z_move == pytest.approx(Z_EMPTY)  # clamps to the floor
 
     def test_rule_1_4_negative_distance_clamps_to_zero(self) -> None:
         h = Harness()
-        h.send_frame(KONTOR, still_d=-5, still_e=35)
+        h.send_frame(KONTOR, still_d=-5, still_e=35, still=True)
         # clamped to 0 cm, inside desk's masked interval [30-30, 150+30]
         assert h.zone(DESK).still_gated

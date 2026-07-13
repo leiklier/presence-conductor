@@ -3,7 +3,7 @@ anyone home.
 
 All values are read straight from the engine's published state (spec §0);
 nothing is re-derived here. Zone entities report unavailable while their
-zone's health is UNKNOWN (rule 1.3: outputs hold, probability is stale —
+zone's health is UNKNOWN (rule 1.3: outputs hold, confidence is stale —
 unavailable is the honest HA mapping). Room and home entities report
 unavailable when fusion publishes ``None`` (rules 6.3, 6.5): "blind" must
 stay distinguishable from "nobody there".

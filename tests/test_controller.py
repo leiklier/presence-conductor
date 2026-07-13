@@ -544,20 +544,20 @@ async def test_pass_by_fires_bus_event_and_event_entities(hass: HomeAssistant, m
     assert len(captured) == 1
     assert captured[0].data == {
         "zone_id": "sofakrok",
-        "peak_probability": 0.9312,
+        "peak_confidence": 0.9312,
         "duration": 3.22,
     }
     entity_state = hass.states.get("event.presence_conductor_sofakrok_pass_by")
     assert entity_state.state != "unknown"  # a timestamp: the event fired
     assert entity_state.attributes["event_type"] == "pass_by"
-    assert entity_state.attributes["peak_probability"] == 0.9312
+    assert entity_state.attributes["peak_confidence"] == 0.9312
     assert entity_state.attributes["duration"] == 3.22
     # The zone's room fired too (§6 membership), carrying the zone id.
     room_state = hass.states.get("event.presence_conductor_stue_room_pass_by")
     assert room_state.state != "unknown"
     assert room_state.attributes["event_type"] == "pass_by"
     assert room_state.attributes["zone_id"] == "sofakrok"
-    assert room_state.attributes["peak_probability"] == 0.9312
+    assert room_state.attributes["peak_confidence"] == 0.9312
     assert room_state.attributes["duration"] == 3.22
     # The other room saw nothing.
     assert hass.states.get("event.presence_conductor_kontor_room_pass_by").state == "unknown"

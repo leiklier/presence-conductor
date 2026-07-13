@@ -1,8 +1,8 @@
-"""Sensor outputs: activity enums, probabilities, dwell, and diagnostics.
+"""Sensor outputs: activity enums, confidences, dwell, and diagnostics.
 
 Activity is the consumer-facing split (rule 5.3): automations that must not
 react to walk-throughs key on ``active``/``settled`` instead of occupancy.
-Probability and dwell are diagnostic surfaces; the diagnostics sensor
+Confidence and dwell are diagnostic surfaces; the diagnostics sensor
 mirrors the whole engine state at a glance.
 """
 
@@ -38,12 +38,12 @@ async def async_setup_entry(
     entities: list[SensorEntity] = []
     for zone in controller.config.zones:
         entities.append(ZoneActivitySensor(controller, zone))
-        entities.append(ZoneProbabilitySensor(controller, zone))
+        entities.append(ZoneConfidenceSensor(controller, zone))
         entities.append(ZoneDwellSensor(controller, zone))
     for room_id in controller.config.room_ids():
         entities.append(RoomActivitySensor(controller, room_id))
-        entities.append(RoomProbabilitySensor(controller, room_id))
-    entities.append(HomeProbabilitySensor(controller))
+        entities.append(RoomConfidenceSensor(controller, room_id))
+    entities.append(HomeConfidenceSensor(controller))
     entities.append(ConductorStateSensor(controller))
     async_add_entities(entities)
 
@@ -92,23 +92,24 @@ class ZoneActivitySensor(ZoneSensor):
         return self.zone_state.activity.value
 
 
-class ZoneProbabilitySensor(ZoneSensor):
-    """Sigmoid of the zone posterior (§0), as a percentage."""
+class ZoneConfidenceSensor(ZoneSensor):
+    """Zone occupancy confidence (§0), as a percentage — a monotone
+    score, not a calibrated probability (rule 8.7)."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = PERCENTAGE
     _attr_suggested_display_precision = 1
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_translation_key = "zone_probability"
+    _attr_translation_key = "zone_confidence"
 
     def __init__(self, controller: PresenceConductorController, zone: ZoneConfig) -> None:
         super().__init__(controller, zone)
-        self._attr_unique_id = f"{controller.entry.entry_id}_zone_{zone.zone_id}_probability"
-        self._attr_name = f"{zone.name} probability"
+        self._attr_unique_id = f"{controller.entry.entry_id}_zone_{zone.zone_id}_confidence"
+        self._attr_name = f"{zone.name} confidence"
 
     @property
     def native_value(self) -> float:
-        return round(self.zone_state.probability * 100.0, 2)
+        return round(self.zone_state.confidence * 100.0, 2)
 
 
 class ZoneDwellSensor(ZoneSensor):
@@ -172,52 +173,52 @@ class RoomActivitySensor(RoomSensor):
         return activity.value if activity is not None else None
 
 
-class RoomProbabilitySensor(RoomSensor):
-    """Noisy-OR over member posteriors (rule 6.1), as a percentage."""
+class RoomConfidenceSensor(RoomSensor):
+    """Maximum member confidence (rule 6.1), as a percentage."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = PERCENTAGE
     _attr_suggested_display_precision = 1
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_translation_key = "room_probability"
+    _attr_translation_key = "room_confidence"
 
     def __init__(self, controller: PresenceConductorController, room_id: str) -> None:
         super().__init__(controller, room_id)
-        self._attr_unique_id = f"{controller.entry.entry_id}_room_{room_id}_probability"
-        self._attr_name = f"{controller.room_name(room_id)} room probability"
+        self._attr_unique_id = f"{controller.entry.entry_id}_room_{room_id}_confidence"
+        self._attr_name = f"{controller.room_name(room_id)} room confidence"
 
     @property
     def available(self) -> bool:
-        return self.room_state.probability is not None
+        return self.room_state.confidence is not None
 
     @property
     def native_value(self) -> float | None:
-        probability = self.room_state.probability
-        return round(probability * 100.0, 2) if probability is not None else None
+        confidence = self.room_state.confidence
+        return round(confidence * 100.0, 2) if confidence is not None else None
 
 
-class HomeProbabilitySensor(ConductorEntity, SensorEntity):
-    """Sigmoid of the home-level log-odds (rule 6.5), as a percentage."""
+class HomeConfidenceSensor(ConductorEntity, SensorEntity):
+    """Home-level occupancy confidence (rule 6.5), as a percentage."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = PERCENTAGE
     _attr_suggested_display_precision = 1
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_translation_key = "home_probability"
-    _attr_name = "Home probability"
+    _attr_translation_key = "home_confidence"
+    _attr_name = "Home confidence"
 
     def __init__(self, controller: PresenceConductorController) -> None:
         super().__init__(controller)
-        self._attr_unique_id = f"{controller.entry.entry_id}_home_probability"
+        self._attr_unique_id = f"{controller.entry.entry_id}_home_confidence"
 
     @property
     def available(self) -> bool:
-        return self.engine_state.home_probability is not None
+        return self.engine_state.home_confidence is not None
 
     @property
     def native_value(self) -> float | None:
-        probability = self.engine_state.home_probability
-        return round(probability * 100.0, 2) if probability is not None else None
+        confidence = self.engine_state.home_confidence
+        return round(confidence * 100.0, 2) if confidence is not None else None
 
 
 class ConductorStateSensor(ConductorEntity, SensorEntity):
@@ -246,12 +247,12 @@ class ConductorStateSensor(ConductorEntity, SensorEntity):
         return {
             "enabled": state.enabled,
             "home_lambda": round(state.lam_home, 4),
-            "home_probability": state.home_probability,
+            "home_confidence": state.home_confidence,
             "anyone_home": state.anyone_home,
             "zones": {
                 zone_id: {
                     "lambda": round(zst.lam, 4),
-                    "probability": round(zst.probability, 4),
+                    "confidence": round(zst.confidence, 4),
                     "health": zst.health.value,
                     "activity": zst.activity.value,
                     "occupied": zst.occupied,
@@ -274,7 +275,7 @@ class ConductorStateSensor(ConductorEntity, SensorEntity):
                     "motion": room.motion,
                     "activity": room.activity.value if room.activity is not None else None,
                     "settled": room.settled,
-                    "probability": room.probability,
+                    "confidence": room.confidence,
                 }
                 for room_id, room in state.rooms.items()
             },
