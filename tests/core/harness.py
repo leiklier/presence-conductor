@@ -157,6 +157,9 @@ def frame(
     still: bool = False,
     gate_move: tuple[float | None, ...] | None = None,
     gate_still: tuple[float | None, ...] | None = None,
+    move_obs: int = 0,
+    still_obs: int = 0,
+    move_energy_obs: int = 0,
 ) -> SensorFrame:
     """A coalesced frame (rule 1.1). Energies are raw 0-100."""
     return SensorFrame(
@@ -170,6 +173,9 @@ def frame(
         has_still_target=still,
         gate_move=gate_move,
         gate_still=gate_still,
+        move_obs=move_obs,
+        still_obs=still_obs,
+        move_energy_obs=move_energy_obs,
     )
 
 
@@ -199,6 +205,8 @@ class Harness:
         self.emitted: list[tuple[float, object]] = []
         #: plans that asked for calibration persistence.
         self.persist_count = 0
+        #: Per-sensor observation counters (rule 1.1) for send_frame.
+        self.obs_counters: dict[str, list[int]] = {}
         if auto_start:
             self._absorb(self.engine.start(now))
 
@@ -222,8 +230,39 @@ class Harness:
         self._absorb(plan)
         return plan
 
-    def send_frame(self, sensor_id: str, *, at: float | None = None, **frame_kw) -> Plan:
-        return self.submit(frame(sensor_id, **frame_kw), at=at)
+    def send_frame(
+        self,
+        sensor_id: str,
+        *,
+        at: float | None = None,
+        fresh: bool = True,
+        fresh_move: bool | None = None,
+        fresh_still: bool | None = None,
+        fresh_move_energy: bool | None = None,
+        **frame_kw,
+    ) -> Plan:
+        """Submit a coalesced frame. ``fresh`` (default) advances the
+        sensor's observation counters (rule 1.1): each explicit test frame
+        is a new measurement; pass ``fresh=False`` to re-present the cached
+        values, as an unrelated entity change would. The per-channel
+        overrides model partial updates (e.g. a still-only heartbeat)."""
+        counters = self.obs_counters.setdefault(sensor_id, [0, 0, 0])
+        if fresh_move if fresh_move is not None else fresh:
+            counters[0] += 1
+        if fresh_still if fresh_still is not None else fresh:
+            counters[1] += 1
+        if fresh_move_energy if fresh_move_energy is not None else fresh:
+            counters[2] += 1
+        return self.submit(
+            frame(
+                sensor_id,
+                move_obs=counters[0],
+                still_obs=counters[1],
+                move_energy_obs=counters[2],
+                **frame_kw,
+            ),
+            at=at,
+        )
 
     def occupy(self, sensor_id: str, distance: float = 100.0, *, at: float | None = None) -> Plan:
         """Strong gated move evidence: the confirmed fast attack (4.2)
@@ -263,9 +302,9 @@ class Harness:
             self.step_to(self.now + 1.0)
 
     def sustain_quiet(self, sensor_id: str, seconds: float) -> None:
-        """Baseline frames (z = 0): absence evidence per rule 3.2."""
+        """Fresh baseline observations (S = 0): absence evidence (3.2)."""
         for _ in range(round(seconds)):
-            self.submit(quiet(sensor_id))
+            self.send_frame(sensor_id, move_e=100 * MU, still_e=100 * MU)
             self.step_to(self.now + 1.0)
 
     def step_to(self, target: float) -> None:

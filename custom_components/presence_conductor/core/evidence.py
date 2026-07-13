@@ -119,23 +119,51 @@ def centered(raw: float, cal: StatBaseline | None, m: int, t: Tunables) -> float
     if cal is None:
         m0, s0 = stats.onesided_max_stats(m)  # 3.7 analytic fallback
         c0 = stats.clipped_mean(m, t.z_neg_cap, t.z_cap)
+        tau = 1.0  # 3.7: independence assumed when uncalibrated
     else:
-        m0, s0, c0 = cal.mu, cal.sigma, cal.clip_mu
+        m0, s0, c0, tau = cal.mu, cal.sigma, cal.clip_mu, cal.tau
     score = (raw - m0) / max(s0, t.stat_sigma_min)
-    return min(t.z_cap, max(-t.z_neg_cap, score)) - c0
+    # 3.2: correlated observations carry proportionally less independent
+    # information per second (tau from 3.7).
+    return (min(t.z_cap, max(-t.z_neg_cap, score)) - c0) / max(1.0, tau)
 
 
-def evidence_rate(zst: ZoneState, t: Tunables) -> float:
-    """Per-second evidence rate (rule 3.2).
+def _channel_term(z: float, k: float, age: float | None, t: Tunables) -> float:
+    """One channel's contribution to the evidence rate (rules 3.2, 3.8).
 
-    ``k_bias`` is subtracted always — not conditionally — so a calibrated
-    empty zone has a strictly negative expected rate. ``u_cap`` bounds the
-    upward rate: centering fixes the empty process's mean, not its tails,
-    and a one-sample spike held for a second must not out-accumulate a
-    genuine entry (spikes are 4.2's job). This is a calibrated anomaly
-    score, not a log-likelihood ratio (8.7).
+    The absence margin (``k_bias``) is subtracted from every observed
+    score first — E[z] = 0 on calibrated empty noise (3.2/3.7), so the
+    margin makes the expected observed rate exactly ``-(k_move + k_still)
+    * k_bias`` for any gate count. A positive shifted score is live for
+    ``obs_budget`` after its observation — a held value is one
+    measurement, not one per second; a non-positive one is live for
+    ``obs_hold``. Past its window the channel is silent.
     """
-    return min(t.u_cap, t.k_move * zst.z_move + t.k_still * zst.z_still - t.k_bias)  # 3.2
+    if age is None:
+        return 0.0  # never observed
+    shifted = z - t.k_bias  # 3.2: the absence margin
+    if shifted > 0.0:
+        return k * shifted if age <= t.obs_budget else 0.0
+    return k * shifted if age <= t.obs_hold else 0.0
+
+
+def evidence_rate(
+    zst: ZoneState, t: Tunables, move_age: float | None, still_age: float | None
+) -> float:
+    """Per-second evidence rate (rule 3.2) at the given observation ages.
+
+    ``k_bias`` is subtracted whenever at least one channel is
+    observationally live (3.8) — with both channels silent the rate is 0
+    and the belief simply relaxes toward the prior (4.1). ``u_cap`` bounds
+    the upward rate: centering fixes the empty process's mean, not its
+    tails, and a one-sample spike must not out-accumulate a genuine entry
+    (spikes are 4.2's job). This is a calibrated anomaly score, not a
+    log-likelihood ratio (8.7).
+    """
+    rate = _channel_term(zst.z_move, t.k_move, move_age, t) + _channel_term(
+        zst.z_still, t.k_still, still_age, t
+    )
+    return min(t.u_cap, rate)  # 3.2
 
 
 #: Normalized frame energies: aggregates plus optional per-gate tuples.
@@ -170,8 +198,13 @@ def ingest_frame(engine: ConductorEngine, frame: SensorFrame, now: float | None)
             continue
         owned = engine.owned_gates[zone.zone_id]  # 2.4
         move_gated, still_gated = gates[zone.zone_id]
-        raw_move = gate_statistic(gate_move, owned, zst.gate_move_baselines, t)  # 2.5
-        raw_still = gate_statistic(gate_still, owned, zst.gate_still_baselines, t)  # 2.5
+        if t.use_gate_evidence:
+            raw_move = gate_statistic(gate_move, owned, zst.gate_move_baselines, t)  # 2.5
+            raw_still = gate_statistic(gate_still, owned, zst.gate_still_baselines, t)  # 2.5
+        else:
+            # 2.6: gate evidence is experimental until real gate-path
+            # timing is captured; calibration still records gate rows.
+            raw_move = raw_still = None
         gate_tau, agg_tau = engine.attack_thresholds[zone.zone_id]  # 4.2
         if raw_move is not None:
             # 2.6: gate evidence replaces the aggregate path for this frame;
@@ -217,17 +250,18 @@ def apply_frame(engine: ConductorEngine, frame: SensorFrame, now: float) -> None
     """Frame-side evidence work: freshness, ingest, sensor caches,
     adaptation."""
     sensor = engine.state.sensors[frame.sensor_id]
-    # 4.2: the adapter re-emits the complete cached frame on ANY entity
-    # change, so only a *changed* move view carries a new move measurement
-    # (under ESPHome deduplication a changed value is exactly that).
-    move_view = (
-        frame.moving_distance_cm,
-        frame.move_energy,
-        frame.has_moving_target,
-        frame.gate_move,
-    )
-    sensor.move_fresh = move_view != sensor.move_view
-    sensor.move_view = move_view
+    # 1.1 observation clock: a counter advance is a new measurement; the
+    # values alone cannot say (the adapter re-emits its cached frame on
+    # any entity change, and a forced same-value re-publication IS a new
+    # measurement).
+    if frame.move_obs != sensor.move_obs:
+        sensor.move_obs = frame.move_obs
+        sensor.move_obs_at = now
+    if frame.still_obs != sensor.still_obs:
+        sensor.still_obs = frame.still_obs
+        sensor.still_obs_at = now
+    sensor.move_energy_fresh = frame.move_energy_obs != sensor.move_energy_obs  # 4.2
+    sensor.move_energy_obs = frame.move_energy_obs
     energies = ingest_frame(engine, frame, now)
     move_e, still_e, gate_move, gate_still = energies
     # Caches feed the tick-aligned calibration rows (3.3); a None field
@@ -349,8 +383,13 @@ def collect_baseline_rows(engine: ConductorEngine) -> None:
                 still_e=sensor.last_still_e,
                 gate_move=sensor.last_gate_move,
                 gate_still=sensor.last_gate_still,
+                # 3.1/3.7: held/deduplicated rows repeat one measurement.
+                move_fresh=sensor.move_obs != recording.last_move_obs,
+                still_fresh=sensor.still_obs != recording.last_still_obs,
             )
         )
+        recording.last_move_obs = sensor.move_obs
+        recording.last_still_obs = sensor.still_obs
 
 
 def on_record_baseline(
@@ -392,6 +431,26 @@ def on_record_baseline(
     plan.start_timer(baseline_end(zone.zone_id), duration)  # 3.3
 
 
+def _lag1_autocorr(values: list[float]) -> float:
+    """Lag-1 autocorrelation of a sequence; 0 for degenerate variance."""
+    n = len(values)
+    mean = fmean(values)
+    var = sum((v - mean) ** 2 for v in values)
+    if var <= 0.0:
+        return 0.0
+    cov = sum((values[i] - mean) * (values[i + 1] - mean) for i in range(n - 1))
+    return max(0.0, min(0.999, cov / var))
+
+
+def _distinct(values: list[float]) -> list[float]:
+    """Collapse consecutive duplicates (3.1): held rows are one measurement."""
+    out: list[float] = []
+    for value in values:
+        if not out or value != out[-1]:
+            out.append(value)
+    return out
+
+
 def _stat_of(raws: list[float], m: int, t: Tunables) -> StatBaseline | None:
     """Empirical ``(m0, s0, c0)`` of the raw statistic over a window (3.7),
     shrunk toward safety.
@@ -410,7 +469,11 @@ def _stat_of(raws: list[float], m: int, t: Tunables) -> StatBaseline | None:
     m0 = fmean(raws)
     s0 = max(t.stat_sigma_min, reference_s0, pstdev(raws))
     c0 = fmean(min(t.z_cap, max(-t.z_neg_cap, (raw - m0) / s0)) for raw in raws)
-    return StatBaseline(m0, s0, c0)
+    # 3.7: integrated autocorrelation time under an AR(1) assumption —
+    # correlated empty noise must integrate at its information rate (3.2).
+    rho = _lag1_autocorr(raws)
+    tau = max(1.0, min(t.tau_int_max, (1.0 + rho) / (1.0 - rho)))
+    return StatBaseline(m0, s0, c0, tau)
 
 
 def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Plan) -> None:
@@ -430,16 +493,30 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
         # points — keep the old calibration entirely, persist nothing.
         return
     owned = engine.owned_gates[zone.zone_id]  # 2.4
-    # 3.1/3.3: aggregate floors. A channel whose column is too thin keeps
-    # its previous floor (same coverage bar as the window itself).
+
+    def floor_of(column: list[float]) -> ChannelStats | None:
+        # 3.1: only distinct observations carry information; a rank UCB
+        # over held repeats overstates its confidence.
+        samples = _distinct(column)
+        if len(samples) >= t.stat_min_rows:
+            return ChannelStats(*robust_stats(samples, t.sigma_min, t.energy_quantum))
+        if (
+            len(column) >= t.stat_min_rows
+            and samples
+            and (max(samples) - min(samples) <= t.energy_quantum)
+        ):
+            # 3.1: quiescent channel — the empty signal simply never moves;
+            # no scale can or need be estimated beyond the floors.
+            return ChannelStats(median(samples), t.sigma_min)
+        return None  # too few independent changes: keep the old floor
+
+    # 3.1/3.3: aggregate floors.
     move_samples = [row.move_e for row in rows if row.move_e is not None]
     still_samples = [row.still_e for row in rows if row.still_e is not None]
-    if len(move_samples) >= t.stat_min_rows:
-        zst.move_baseline = ChannelStats(*robust_stats(move_samples, t.sigma_min, t.energy_quantum))
-    if len(still_samples) >= t.stat_min_rows:
-        zst.still_baseline = ChannelStats(
-            *robust_stats(still_samples, t.sigma_min, t.energy_quantum)
-        )
+    if (floor := floor_of(move_samples)) is not None:
+        zst.move_baseline = floor
+    if (floor := floor_of(still_samples)) is not None:
+        zst.still_baseline = floor
     # 3.6: per-gate floors are replaced alongside the aggregates.
     for column_of, floors in (
         (lambda row: row.gate_move, zst.gate_move_baselines),
@@ -453,24 +530,41 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
                 and index < len(values)
                 and values[index] is not None
             ]
-            if len(column) >= t.stat_min_rows:  # 3.3 coverage per gate
-                floors[index] = ChannelStats(
-                    *robust_stats(column, t.sigma_min, t.energy_quantum)
-                )  # 3.3 / 3.6
+            if (floor := floor_of(column)) is not None:
+                floors[index] = floor  # 3.3 / 3.6
     # 3.7: statistic calibration — the post-aggregation raw statistic per
     # channel and path, scored against the floors just recorded, so the
     # centered score's empty-room mean is ~0 by construction. Full replace:
     # paths without rows fall back to the analytic values.
+    # 3.7: statistics over fresh rows only — held rows repeat measurements.
+    move_rows = [row for row in rows if row.move_fresh]
+    still_rows = [row for row in rows if row.still_fresh]
     zst.stat_cal = {}
     for key, m, raws in (
-        ("move_agg", 1, [onesided_z(e, zst.move_baseline) for e in move_samples]),
-        ("still_agg", 1, [onesided_z(e, zst.still_baseline) for e in still_samples]),
+        (
+            "move_agg",
+            1,
+            [
+                onesided_z(row.move_e, zst.move_baseline)
+                for row in move_rows
+                if row.move_e is not None
+            ],
+        ),
+        (
+            "still_agg",
+            1,
+            [
+                onesided_z(row.still_e, zst.still_baseline)
+                for row in still_rows
+                if row.still_e is not None
+            ],
+        ),
         (
             "move_gate",
             len(owned),
             [
                 s
-                for row in rows
+                for row in move_rows
                 if (s := gate_statistic(row.gate_move, owned, zst.gate_move_baselines, t))
                 is not None
             ],
@@ -480,7 +574,7 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
             len(owned),
             [
                 s
-                for row in rows
+                for row in still_rows
                 if (s := gate_statistic(row.gate_still, owned, zst.gate_still_baselines, t))
                 is not None
             ],

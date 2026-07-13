@@ -49,7 +49,16 @@ full output set even though they fuse into one room.
   publishes, so a frozen value is normal and the adapter must not null a
   distance just because its target flag turned off — distance freshness is
   the core's job (2.7), and production and replay must feed frames by this
-  same contract. Energies are 0–100, `None` when unknown. `gate_move`/`gate_still` carry the
+  same contract. Because a frame is re-emitted on *any* entity change, the
+  values alone cannot say which measurement is new: the frame also carries
+  an explicit **observation clock** — three monotonic counters,
+  `move_obs` / `still_obs` (incremented whenever any entity of that
+  channel receives a reported update, *including* a same-value forced
+  re-publication such as the still-energy heartbeat — the radar
+  re-measured and got the same number) and `move_energy_obs` (move-energy
+  or gate-move entities only, consumed by 4.2). The engine keys held-value
+  handling (3.8) and attack freshness (4.2) on these counters, never on
+  value comparison. Energies are 0–100, `None` when unknown. `gate_move`/`gate_still` carry the
   per-gate energies of engineering mode (2.4–2.6): nine elements — one per
   LD2410 distance gate `g0..g8` — with `None` for gates the device does not
   currently report; the whole tuple is `None` when the sensor has no gate
@@ -116,6 +125,14 @@ full output set even though they fuse into one room.
   frame produced. The motion channel (4.4) keys on the gate move score
   while gate evidence is in effect; the sensor-global `has_moving_target`
   flag is not zone evidence when the gates already say where the mover is.
+  **Status: experimental, default off** (`use_gate_evidence`, default
+  false — gate tuples are ignored for evidence while calibration still
+  records them). The temporal model (3.8) is validated against synthetic
+  held/AR processes and the aggregate path against 24 h of live history,
+  but the *gate path's* real update cadence, run lengths and cross-gate
+  correlation have never been captured (the recorder excludes gate
+  entities by design); until a bounded empty-room gate capture validates
+  them, production defaults to the field-validated aggregate path.
 - **2.7 Distance freshness.** Measured on real MSR-2 history: when a target
   flag turns off, the distance entity simply stops updating and *freezes at
   the last target's location* (it neither zeroes nor clears). A frozen
@@ -148,11 +165,21 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   by 25–40%, and *every* future score is inflated by that error — an
   underestimated scale is a hazard, not a calibration. So
   `sigma = MAD_TO_SIGMA · (UCB(median |deviation|) + energy_quantum / 2)`,
-  floored by `sigma_min`, where `UCB` is the distribution-free one-sided
-  95% upper confidence bound for a median: the k-th order statistic of the
-  absolute deviations with `k = ceil(n/2 + 1.645 · sqrt(n) / 2)`. This is
-  what keeps the analytic attack tail (4.2) and the centered evidence
-  variance (3.2) meaningful *predictively*, on data the window never saw.
+  floored by `sigma_min`, where `UCB` is the one-sided 95% upper
+  confidence bound for a median: the k-th order statistic of the absolute
+  deviations with `k = ceil(n/2 + 1.645 · sqrt(n) / 2)`. The samples are
+  the window's **distinct observations** — consecutive duplicate values
+  are collapsed first, because held/deduplicated rows repeat one
+  measurement and a rank bound computed over repeats overstates its
+  confidence. A channel whose distinct samples span at most one quantum is
+  *quiescent* and calibrates to `(value, sigma_min)` directly; a channel
+  with fewer than `stat_min_rows` distinct samples that is not quiescent
+  keeps its previous floor — re-run with a longer `duration` instead.
+  Stated assumptions (this is **not** distribution-free end to end): the
+  rank-based UCB assumes the distinct observations are independent draws
+  (3.7's dependence estimate discounts them when they are not); the
+  1.4826 MAD-to-sigma conversion and the analytic attack tail (4.2) assume
+  approximately Gaussian empty noise.
 - **3.2 Evidence score.** Per frame and channel, the **raw statistic** `S`
   is the one-sided deviation from the noise floor: on the gate path,
   `S = max over owned gates of max(0, (energy_g − mu_g) / sigma_g)` (2.5);
@@ -167,15 +194,22 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   (per path, per owned-gate count) — and `c0` is the empty-room mean of the
   *clamped* score: asymmetric clamping alone would leave a positive
   residual mean for multi-gate maxima (≈ +0.05 to +0.07), so the final
-  score is recentered after clamping. `E[ẑ | empty] = 0` up to estimation
-  error, by construction — measured for empirical calibrations, derived
-  numerically for the analytic fallback.
+  score is recentered after clamping, and finally divided by the path's
+  estimated **integrated autocorrelation time** `τ̂` (3.7): correlated
+  observations carry proportionally less independent information per
+  second, and integrating them at full rate is how autocorrelated empty
+  noise walks a zone occupied. `E[ẑ | empty] = 0` up to estimation error,
+  by construction — measured for empirical calibrations, derived
+  numerically for the analytic fallback (which assumes `τ̂ = 1`).
   The per-second evidence rate is
-  `u = min(u_cap, k_move · ẑ_move + k_still · ẑ_still − k_bias)`
-  (defaults `k_move = 0.5`, `k_still = 0.3`, `k_bias = 0.4`, `u_cap =
-  3.0`). `k_bias` is the absence bias: subtracted always — not
-  conditionally — it makes `E[u | empty] ≤ −k_bias < 0` and is what drives
-  an empty zone down. There is no discontinuous "any z > 0 ⇒ positive
+  `u = min(u_cap, k_move · (ẑ_move − k_bias) + k_still · (ẑ_still −
+  k_bias))` over the observationally live channels (3.8); defaults
+  `k_move = 0.5`, `k_still = 0.3`, `k_bias = 0.5`, `u_cap = 3.0`.
+  `k_bias` is the **absence margin**: `E[ẑ] = 0` on calibrated empty
+  noise for *any* gate count (3.7), so subtracting the margin from every
+  observed score makes the expected observed rate exactly
+  `−(k_move + k_still) · k_bias = −0.4/s` — what drives an empty zone
+  down, with no conditional bias machinery to mis-tune per topology. There is no discontinuous "any z > 0 ⇒ positive
   evidence" rule. Two guards bound the *variance* of the empty process,
   not just its mean — centering fixes the expectation, but a mean-zero
   random walk still crosses any threshold given enough variance. First,
@@ -268,6 +302,37 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   Rare-tail behavior is never taken from the window at all: the fast
   attack (4.2) thresholds on the analytic tail regardless of calibration,
   until long-run empty recordings exist to certify anything sharper (8.7).
+  Statistics are computed over the window's **fresh rows** only (rows on
+  which the path's observation counter advanced, 1.1); the lag-1
+  autocorrelation `ρ̂` of that fresh sequence yields
+  `τ̂ = clamp((1 + ρ̂)/(1 − ρ̂), 1, tau_int_max)` (AR(1) assumption,
+  `tau_int_max` default 25), stored with the statistic and applied at
+  runtime (3.2). A path whose fresh rows fall below `stat_min_rows` keeps
+  the analytic fallback — if that happens, the room's traffic is too
+  deduplicated for a 120 s window: re-run with a longer `duration`.
+- **3.8 Held evidence and the observation clock.** The integrator (4.1)
+  consumes evidence only while it is *observationally live*, per channel:
+  a **positive** centered score integrates for at most `obs_budget`
+  (default 1.0 s — the nominal reporting period) after the channel's last
+  observation (1.1); a **non-positive** score integrates for at most
+  `obs_hold` (default 5 s); the positive/non-positive split is evaluated
+  on the margin-shifted score (3.2). Occupied streams pausing between
+  reports therefore never drain through the margin — a stale positive
+  contributes nothing rather than turning into absence. Past the
+  windows a channel contributes nothing, and with everything silent
+  `u = 0` — the belief simply relaxes toward the prior (the departure
+  hazard is the only thing silence licenses). Rationale: deduplication holds the last
+  value in every cache, but a held value is *one* measurement — counting
+  it every second lets a single empty-room excursion accumulate
+  indefinitely (measured: exact floors, 9 gates, values held 5 s → 96%
+  false-occupied hours before this rule). The asymmetry is deliberate and
+  conservative in both directions: elevated evidence must be re-observed
+  to keep accumulating (a settled person's wobble and the still-energy
+  heartbeat both do this naturally), while at-floor evidence may drive
+  the zone down a little longer. A latched zone whose observations stop
+  entirely decays out over ~2 minutes (`tau_decay`) unless staleness
+  (1.3) marks it UNKNOWN first — occupancy without observations is a
+  claim the engine refuses to keep making.
 
 ## 4. Occupancy filter
 
@@ -299,14 +364,16 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   waiting for a tick — once `attack_confirm` (default 2) qualifying
   **fresh move observations** have arrived, consecutive ones separated by
   at least `attack_gap_min` (default 0.3 s) and at most `attack_gap_max`
-  (default 3 s). *Fresh* means the frame's move-channel fields (gate-move
-  tuple, move energy, moving distance, moving flag) actually changed:
-  the adapter re-emits its complete cached frame on **any** entity change,
-  so an unrelated update (a still-energy heartbeat) re-presents a held
-  move spike without any new move measurement behind it — elapsed time
-  alone proves nothing. Under ESPHome deduplication a changed value is
-  exactly a new measurement; `attack_gap_min` additionally collapses the
-  burst of per-gate entity updates one radar frame produces. Non-fresh
+  (default 3 s). *Fresh* means the frame's `move_energy_obs` counter
+  (1.1) advanced — a new move-energy or gate-move measurement was
+  actually reported. The adapter re-emits its complete cached frame on
+  **any** entity change, so an unrelated update (a still-energy
+  heartbeat, a churning distance) re-presents a held move spike without
+  any new measurement behind it — elapsed time alone proves nothing, and
+  value comparison is the wrong proxy (a forced same-value
+  re-publication IS a new measurement; a burst of per-gate entity
+  updates from one radar frame is one). `attack_gap_min` additionally
+  collapses that burst. Non-fresh
   frames leave the attack state untouched; a fresh non-qualifying move
   observation resets the count. One observation is a max-over-gates
   excursion that empty-room noise produces routinely (3.2); N fresh ones,
@@ -325,8 +392,13 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   automations that want raw responsiveness (hallway lights) and accepts
   flicker by design; occupancy (4.2, 4.3) deliberately demands more.
 - **4.5 Clamp.** `lambda` is clamped to `[lambda_min, lambda_max]`
-  (confidence 0.001 / 0.999) so long occupation cannot build unbounded
-  inertia.
+  (confidence 0.001 / 0.999) so occupation cannot build unbounded inertia.
+  Clearing the ceiling takes ~7–10 s of consecutively observed at-floor
+  readings; measured empty streams keep reporting at a ~2.5 s cadence, so
+  departures clear promptly, while sub-threshold dropout margins (above
+  the floor, 3.5) never count as observed absence and bridge. The clamp is
+  applied continuously (per integration segment), so trajectories are
+  cadence-invariant.
 
 ## 5. Activity classification and pass-by
 
@@ -450,4 +522,10 @@ A per-zone FSM driven by the occupancy belief and channel dominance:
   between zones, recovery from sustained upward background shifts, labeled
   replay metrics (false-occupied minutes per empty hour, entry/exit latency
   percentiles), and a bounded synchronized frame-capture facility for
-  evaluating the production gate path.
+  evaluating the production gate path (which also gates flipping
+  `use_gate_evidence` on by default, 2.6). Temporal-model assumptions
+  (3.7, 3.8): dependence is treated as AR(1)-like with a clamped
+  integrated autocorrelation time estimated from the calibration window;
+  the observation clock treats each reported update as one measurement.
+  Cross-gate and move/still cross-correlation are not modeled beyond the
+  max-statistic calibration.

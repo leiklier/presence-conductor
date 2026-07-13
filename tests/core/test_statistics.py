@@ -67,6 +67,7 @@ def _gate_zone_config(far_cm: float) -> ConductorConfig:
         sensors=(SensorConfig(KONTOR, "Kontor"),),
         zones=(ZoneConfig("z", "Z", KONTOR, room_id="r", near_cm=0, far_cm=far_cm),),
         rooms=(RoomConfig("r", "R"),),
+        tunables=Tunables(use_gate_evidence=True),  # 2.6: gate tests opt in
     )
 
 
@@ -108,7 +109,7 @@ def test_calibrated_empty_gate_noise_never_occupies(far_cm: float) -> None:
             gate_move=_noise_tuple(rng, owned),
             gate_still=_noise_tuple(rng, owned),
         )
-        rate_sum += evidence.evidence_rate(zone, config.tunables)
+        rate_sum += evidence.evidence_rate(zone, config.tunables, 0.0, 0.0)
         h.step_to(h.now + 1.0)
         assert not zone.occupied, f"false occupancy at t={second} with m={len(owned)}"
     # §3: the expected evidence rate in a calibrated empty room is negative.
@@ -303,6 +304,91 @@ def test_calibration_voids_current_occupancy_without_pass_by() -> None:
     assert h.pass_bys() == []
 
 
+class TestRule38HeldAndCorrelatedNoise:
+    """Round-4 review regressions: temporal dependence of empty noise."""
+
+    @pytest.mark.parametrize("hold", [2, 5, 10])
+    def test_held_h0_values_never_occupy(self, hold: int) -> None:
+        """Protocol A: exact floors, each fresh draw held for H seconds and
+        re-presented every second by the cache (no observation-counter
+        advance). Before rule 3.8: H=5 -> 96% false hours; H=10 -> 100%."""
+        config = _gate_zone_config(600.0)
+        floors = {i: GateBaselines(0.20, 0.05, 0.20, 0.05) for i in range(9)}
+        h = Harness(
+            config,
+            InitialSnapshot(baselines={"z": ZoneBaselines(0.20, 0.05, 0.20, 0.05, gates=floors)}),
+        )
+        owned = h.engine.owned_gates["z"]
+        rng = random.Random(3)
+        zone = h.zone("z")
+        held_m = held_s = None
+        for second in range(3600):
+            fresh = second % hold == 0
+            if fresh:
+                held_m = _tuple_at(rng, owned, 20.0, 5.0)
+                held_s = _tuple_at(rng, owned, 20.0, 5.0)
+            h.send_frame(KONTOR, gate_move=held_m, gate_still=held_s, fresh=fresh)
+            h.step_to(h.now + 1.0)
+            assert not zone.occupied, f"H={hold}: false occupancy at t={second}"
+
+    @pytest.mark.parametrize("rho", [0.5, 0.9])
+    def test_ar1_h0_noise_never_occupies(self, rho: float) -> None:
+        """Protocol B: stationary per-gate AR(1) empty noise, calibrated.
+        Before the 3.7 autocorrelation discount: rho=0.9 -> ~all hours
+        falsely occupied through the accumulator."""
+        config = _gate_zone_config(600.0)
+        h = Harness(config, InitialSnapshot())
+        owned = h.engine.owned_gates["z"]
+        rng = random.Random(7)
+        innov = math.sqrt(1.0 - rho * rho)
+        state_m = dict.fromkeys(owned, 0.0)
+        state_s = dict.fromkeys(owned, 0.0)
+
+        def draw() -> tuple:
+            for st in (state_m, state_s):
+                for i in st:
+                    st[i] = rho * st[i] + innov * rng.gauss(0, 1)
+            quant = lambda v: float(max(0, min(100, round(20 + 5 * v))))  # noqa: E731
+            return (
+                gate_tuple({i: quant(state_m[i]) for i in owned}, fill=None),
+                gate_tuple({i: quant(state_s[i]) for i in owned}, fill=None),
+            )
+
+        zone = h.zone("z")
+        h.submit(RecordBaseline("z", duration=120.0))
+        for _ in range(121):
+            m, st = draw()
+            h.send_frame(KONTOR, gate_move=m, gate_still=st)
+            h.step_to(h.now + 1.0)
+        if rho >= 0.9:
+            # 3.7: the dependence was measured and discounts the rate.
+            assert zone.stat_cal["move_gate"].tau > 3.0
+        for second in range(60 + 3600):
+            m, st = draw()
+            h.send_frame(KONTOR, gate_move=m, gate_still=st)
+            h.step_to(h.now + 1.0)
+            assert not zone.occupied, f"rho={rho}: false occupancy at t={second}"
+
+    def test_held_calibration_rows_do_not_overstate_confidence(self) -> None:
+        """Rows without an observation-counter advance are excluded from
+        floors and statistics (3.1, 3.7): tick count is not sample count."""
+        config = _gate_zone_config(150.0)
+        h = Harness(config, InitialSnapshot())
+        owned = h.engine.owned_gates["z"]
+        rng = random.Random(9)
+        h.submit(RecordBaseline("z", duration=120.0))
+        held = None
+        for second in range(121):
+            fresh = second % 10 == 0  # 12 real measurements in 120 rows
+            if fresh:
+                held = _tuple_at(rng, owned, 20.0, 5.0)
+            h.send_frame(KONTOR, gate_move=held, gate_still=held, fresh=fresh)
+            h.step_to(h.now + 1.0)
+        zone = h.zone("z")
+        assert zone.gate_move_baselines == {}  # 12 distinct < stat_min_rows
+        assert zone.stat_cal == {}
+
+
 class TestRule37Shrinkage:
     def test_empirical_scale_is_floored_by_the_analytic_reference(self) -> None:
         """A near-constant window would fit a tiny s0; the stored scale must
@@ -376,13 +462,30 @@ class TestRule41Chronology:
         assert not sofa.occupied
 
     def test_the_same_evidence_integrates_forward(self) -> None:
-        """The mirror image: the frame arriving just after a tick counts
-        for the full following interval."""
+        """The mirror image: sustained observations after a tick integrate
+        forward. (A single observation is one measurement — its positive
+        evidence lives for obs_budget only, rule 3.8 — so the entry is a
+        stream of fresh readings, as a real person produces.)"""
         h = Harness()
         h.tick(at=10.0)
-        h.send_frame(SOFAKROK, still_d=100, still_e=35, still=True, at=10.1)
-        h.tick(at=20.0)
+        for i in range(10):
+            h.send_frame(SOFAKROK, still_d=100, still_e=35 + (i % 2), still=True, at=10.1 + i)
+        h.tick(at=21.0)
         assert h.zone(SOFA).occupied
+
+    def test_a_held_excursion_is_one_measurement(self) -> None:
+        """Rule 3.8: a strong value re-presented without fresh observations
+        adds at most obs_budget seconds of evidence — the round-4 review's
+        held-noise failure mode."""
+        h = Harness()
+        h.send_frame(SOFAKROK, still_d=100, still_e=35, still=True, at=1.0)
+        # The cache re-presents the held value for a minute of ticks.
+        for i in range(60):
+            h.send_frame(SOFAKROK, still_d=100, still_e=35, still=True, at=2.0 + i, fresh=False)
+            h.tick(at=2.5 + i)
+        zone = h.zone(SOFA)
+        assert not zone.occupied
+        assert zone.confidence < 0.10
 
     @staticmethod
     def _drive(tick_times: list[float]) -> float:
@@ -511,7 +614,7 @@ class TestRule37Statistic:
                 moving=True,
                 still=True,
             )
-            rates.append(evidence.evidence_rate(desk, config.tunables))
+            rates.append(evidence.evidence_rate(desk, config.tunables, 0.0, 0.0))
             h.step_to(h.now + 1.0)
         mean_rate = sum(rates) / len(rates)
         t = Tunables()

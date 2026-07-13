@@ -118,6 +118,16 @@ _GATE_ROLE_INDEX: dict[str, tuple[str, int]] = {
     **{role: ("still", index) for index, role in enumerate(GATE_STILL_ROLES)},
 }
 
+#: Observation-clock role sets (rule 1.1). ``target`` flips when any kind
+#: of target appears or disappears: it observes both channels.
+_MOVE_ROLES = frozenset(
+    {ROLE_MOVE_ENERGY, ROLE_MOVING_DISTANCE, ROLE_MOVING_TARGET, ROLE_TARGET, *GATE_MOVE_ROLES}
+)
+_STILL_ROLES = frozenset(
+    {ROLE_STILL_ENERGY, ROLE_STILL_DISTANCE, ROLE_STILL_TARGET, ROLE_TARGET, *GATE_STILL_ROLES}
+)
+_MOVE_ENERGY_ROLES = frozenset({ROLE_MOVE_ENERGY, *GATE_MOVE_ROLES})
+
 
 class EngineProtocol(Protocol):
     """The engine surface the controller drives (real or test double)."""
@@ -169,9 +179,21 @@ class _SensorView:
     gate_still: list[float | None] | None = None
     #: Availability over the required (energy) roles, rule 1.3.
     available: bool = False
+    #: Observation clock (rule 1.1): counters advanced on every reported
+    #: update of a channel's entities, including same-value forced
+    #: re-publications — that is a new measurement, not a duplicate.
+    move_obs: int = 0
+    still_obs: int = 0
+    move_energy_obs: int = 0
 
     def update(self, role: str, state: State | None) -> None:
         """Fold one entity state into the view."""
+        if role in _MOVE_ROLES:
+            self.move_obs += 1
+        if role in _STILL_ROLES:
+            self.still_obs += 1
+        if role in _MOVE_ENERGY_ROLES:
+            self.move_energy_obs += 1
         if (gate := _GATE_ROLE_INDEX.get(role)) is not None:
             channel, index = gate
             values = self.gate_move if channel == "move" else self.gate_still
@@ -213,6 +235,9 @@ class _SensorView:
             has_still_target=self.has_still_target,
             gate_move=None if self.gate_move is None else tuple(self.gate_move),
             gate_still=None if self.gate_still is None else tuple(self.gate_still),
+            move_obs=self.move_obs,
+            still_obs=self.still_obs,
+            move_energy_obs=self.move_energy_obs,
         )
 
 
@@ -516,7 +541,7 @@ class PresenceConductorController:
             # before 3.7 (or not at all) persist without it and score
             # against the analytic fallback.
             stats = {
-                key: {"mu": cal.mu, "sigma": cal.sigma, "clip_mu": cal.clip_mu}
+                key: {"mu": cal.mu, "sigma": cal.sigma, "clip_mu": cal.clip_mu, "tau": cal.tau}
                 for key, cal in sorted(zst.stat_cal.items())
             }
             if stats:

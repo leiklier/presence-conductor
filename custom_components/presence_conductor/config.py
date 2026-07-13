@@ -116,6 +116,7 @@ def baselines_from_options(options: Mapping[str, Any]) -> dict[str, ZoneBaseline
                     mu=float(s["mu"]),
                     sigma=float(s["sigma"]),
                     clip_mu=float(s.get("clip_mu", 0.0)),
+                    tau=float(s.get("tau", 1.0)),
                 )
                 for key, s in (b.get("stats") or {}).items()
             },

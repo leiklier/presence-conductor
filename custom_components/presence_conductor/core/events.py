@@ -47,6 +47,16 @@ class SensorFrame(Event):
     #: sensor has no gate entities configured or has never reported them.
     gate_move: tuple[float | None, ...] | None = None
     gate_still: tuple[float | None, ...] | None = None
+    #: Observation clock (rule 1.1): monotonic counters the adapter advances
+    #: whenever an entity of the channel receives a reported update —
+    #: including same-value forced re-publications. The engine keys held-
+    #: value handling (3.8) and attack freshness (4.2) on counter advances
+    #: (inequality with the last seen value), never on value comparison.
+    move_obs: int = 0
+    still_obs: int = 0
+    #: Move-energy observations only (move_energy or gate-move entities);
+    #: consumed by the fast-attack confirmation (4.2).
+    move_energy_obs: int = 0
 
 
 @dataclass(frozen=True, slots=True)

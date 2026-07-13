@@ -157,6 +157,9 @@ async def test_engine_started_with_monotonic_now(hass: HomeAssistant, monkeypatc
         still_distance_cm=0.0,
         move_energy=2.0,
         still_energy=2.0,
+        move_obs=frame.move_obs,
+        still_obs=frame.still_obs,
+        move_energy_obs=frame.move_energy_obs,
     )
     assert fake.snapshot.baselines["sofakrok"].still_mu == 0.3
 
@@ -179,24 +182,37 @@ async def test_any_entity_change_produces_complete_frame(hass: HomeAssistant, mo
 
     hass.states.async_set(KONTOR_ENTITIES["move_energy"], "42.5")
     await hass.async_block_till_done()
-    assert fake.events_of(SensorFrame)[-1] == SensorFrame(
+    frame = fake.events_of(SensorFrame)[-1]
+    assert frame == SensorFrame(
         sensor_id=KONTOR,
         moving_distance_cm=0.0,
         still_distance_cm=0.0,
         move_energy=42.5,
         still_energy=2.0,
+        move_obs=frame.move_obs,
+        still_obs=frame.still_obs,
+        move_energy_obs=frame.move_energy_obs,
     )
+    first_energy_obs = frame.move_energy_obs
 
     # The next change reuses the cached view: the energy sticks.
     hass.states.async_set(KONTOR_ENTITIES["moving_target"], "on")
     await hass.async_block_till_done()
-    assert fake.events_of(SensorFrame)[-1] == SensorFrame(
+    frame = fake.events_of(SensorFrame)[-1]
+    # 1.1 observation clock: the flag advanced move_obs, but no new energy
+    # measurement arrived.
+    assert frame.move_energy_obs == first_energy_obs
+    assert frame.move_obs > 0
+    assert frame == SensorFrame(
         sensor_id=KONTOR,
         moving_distance_cm=0.0,
         still_distance_cm=0.0,
         move_energy=42.5,
         still_energy=2.0,
         has_moving_target=True,
+        move_obs=frame.move_obs,
+        still_obs=frame.still_obs,
+        move_energy_obs=frame.move_energy_obs,
     )
 
 

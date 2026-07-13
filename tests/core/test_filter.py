@@ -52,9 +52,28 @@ class TestRule42FastAttack:
         not confirm the attack: elapsed time alone proves nothing (4.2)."""
         h = Harness()
         h.send_frame(KONTOR, move_d=100, move_e=25, moving=True)  # candidate
-        # Unrelated still-channel updates re-emit the identical move view.
-        h.send_frame(KONTOR, move_d=100, move_e=25, moving=True, still_e=10, at=0.5)
-        h.send_frame(KONTOR, move_d=100, move_e=25, moving=True, still_e=11, at=1.0)
+        # Unrelated still-channel updates re-emit the identical move view:
+        # the still counter advances, the move-energy counter does not.
+        h.send_frame(
+            KONTOR,
+            move_d=100,
+            move_e=25,
+            moving=True,
+            still_e=10,
+            at=0.5,
+            fresh_move=False,
+            fresh_move_energy=False,
+        )
+        h.send_frame(
+            KONTOR,
+            move_d=100,
+            move_e=25,
+            moving=True,
+            still_e=11,
+            at=1.0,
+            fresh_move=False,
+            fresh_move_energy=False,
+        )
         assert not h.zone(DESK).occupied  # no fresh move measurement arrived
 
     def test_rule_4_2_gap_bounds_the_confirmation(self) -> None:
@@ -119,17 +138,16 @@ class TestRule42FastAttack:
 
 class TestRule43Hysteresis:
     def test_rule_4_3_binary_holds_between_thresholds(self) -> None:
-        # z_neg_cap = 0 keeps the downward pull at the k_bias rate, so the
-        # crossing timings below stay coarse.
-        config = make_config(z_neg_cap=0.0)
+        # z_neg_cap = 0 and a gentle bias keep the downward pull coarse
+        # enough to observe the between-thresholds hold.
+        config = make_config(z_neg_cap=0.0, k_bias=0.3)
         h = Harness(config, make_snapshot(config))
         h.occupy(KONTOR)  # lambda -> lam_attack: 2.944
-        h.submit(quiet(KONTOR))
-        h.run(5)  # absence + decay pull lambda under theta_on
+        h.sustain_quiet(KONTOR, 5)  # observed absence pulls under theta_on
         desk = h.zone(DESK)
         assert h.engine.lam_off < desk.lam < h.engine.lam_on
         assert desk.occupied  # holds between thresholds
-        h.run(7)
+        h.sustain_quiet(KONTOR, 7)
         assert desk.lam <= h.engine.lam_off
         assert not desk.occupied  # off at theta_off
 

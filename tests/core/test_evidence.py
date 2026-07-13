@@ -20,7 +20,6 @@ from .harness import (
     centered_of_raw,
     make_config,
     make_snapshot,
-    quiet,
 )
 
 
@@ -76,21 +75,24 @@ class TestRule32EvidenceScore:
         # 4.1: exact constant-input update over dt = 1 with
         # u = k_still * 6 + k_move * Z_EMPTY - k_bias.
         t = h.config.tunables
-        u = min(t.u_cap, t.k_still * centered_of_raw(35) + t.k_move * Z_EMPTY - t.k_bias)
+        u = min(
+            t.u_cap,
+            t.k_still * (centered_of_raw(35) - t.k_bias) + t.k_move * (Z_EMPTY - t.k_bias),
+        )
         expected = advance(h.engine.lam_prior, h.engine.lam_prior, u, 1.0, 90.0)
         assert h.zone("sofakrok_zone").lam == pytest.approx(expected)
 
-    def test_rule_3_2_bias_applies_always(self) -> None:
-        # A zone that has never seen a frame (scores 0 = at the empty mean)
-        # still integrates -k_bias: expected empty evidence is negative.
+    def test_rule_3_2_bias_applies_while_observed(self) -> None:
+        # A freshly observed channel at scores 0 (the empty mean) still
+        # integrates -k_bias: expected empty evidence is negative. With no
+        # observation at all the rate is 0 (3.8) and the belief only
+        # relaxes toward the prior.
         h = Harness()
         h.tick()
-        expected = advance(h.engine.lam_prior, h.engine.lam_prior, -0.4, 1.0, 90.0)
-        assert h.zone(DESK).lam == pytest.approx(expected)
-        # And a zone at the measured noise floor drives down even harder.
-        h.submit(quiet(KONTOR))
+        assert h.zone(DESK).lam == pytest.approx(h.engine.lam_prior)  # 3.8 silence
+        h.send_frame(KONTOR, move_e=10.001, still_e=10.001)  # observed, near defaults
         h.tick()
-        assert h.zone(DESK).lam < expected
+        assert h.zone(DESK).lam < h.engine.lam_prior  # bias flowed
 
     def test_rule_3_2_clear_still_evidence_outweighs_the_bias(self) -> None:
         h = Harness()

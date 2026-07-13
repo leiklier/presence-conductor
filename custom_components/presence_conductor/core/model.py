@@ -118,15 +118,31 @@ class Tunables:
     #: as well — a short window may recentre but never sharpen the score.
     stat_sigma_min: float = 0.3
     #: Minimum calibration rows before an empirical statistic is accepted
-    #: (rule 3.7); shorter windows keep the analytic fallback.
+    #: (rule 3.7); shorter windows keep the analytic fallback. Counted over
+    #: *distinct observations* (3.1) / *fresh rows* (3.7), never raw ticks.
     stat_min_rows: int = 60
+    #: Clamp on the estimated integrated autocorrelation time (rule 3.7).
+    tau_int_max: float = 25.0
+    #: Observation-clock windows (rule 3.8): positive evidence integrates
+    #: for at most obs_budget after its observation; non-positive evidence
+    #: and the absence bias for at most obs_hold. Past both, silence.
+    obs_budget: float = 1.0
+    obs_hold: float = 5.0
+    #: Gate evidence (2.5-2.6) is experimental until real gate-path timing
+    #: is captured and validated (2.6); the aggregate path is the
+    #: field-validated default.
+    use_gate_evidence: bool = False
     #: Per-second evidence weights and the always-subtracted absence bias
     #: (rule 3.2): ``E[u | calibrated empty] <= -k_bias < 0``. The gains
     #: bound the *variance* of the empty walk (see 3.2); genuine-entry
     #: latching speed is set by ``u_cap``, not the gains.
     k_move: float = 0.5
     k_still: float = 0.3
-    k_bias: float = 0.4
+    #: Absence margin subtracted from every observed centered score
+    #: (3.2/3.8): E[score] = 0 on calibrated empty noise, so the expected
+    #: observed rate is exactly -(k_move + k_still) * k_bias = -0.4/s for
+    #: any gate count.
+    k_bias: float = 0.5
     #: Upward cap on the evidence rate (rule 3.2): one wild sample held for
     #: a second must not out-accumulate a genuine entry.
     u_cap: float = 3.0
@@ -221,6 +237,11 @@ class BaselineRow:
     still_e: float | None
     gate_move: tuple[float | None, ...] | None
     gate_still: tuple[float | None, ...] | None
+    #: Whether each channel's observation counter advanced since the
+    #: previous row (rules 3.1, 3.7): held/deduplicated rows repeat one
+    #: measurement and are excluded from the statistics.
+    move_fresh: bool = True
+    still_fresh: bool = True
 
 
 @dataclass(slots=True)
@@ -234,6 +255,9 @@ class BaselineRecording:
     """
 
     rows: list[BaselineRow] = field(default_factory=list)
+    #: Observation counters at the previous row, for freshness tagging.
+    last_move_obs: int | None = None
+    last_still_obs: int | None = None
 
 
 @dataclass(slots=True)
@@ -324,12 +348,15 @@ class SensorState:
     #: When each target flag was last observed on (rule 2.7 distance hold).
     move_flag_at: float | None = None
     still_flag_at: float | None = None
-    #: Freshness of the current frame's move channel (rule 4.2): the
-    #: adapter re-emits the complete cached frame on any entity change, so
-    #: only a *changed* move view is a new move measurement. ``move_view``
-    #: is the last seen raw move fields; ``move_fresh`` is per-frame.
-    move_view: tuple[object, ...] | None = None
-    move_fresh: bool = False
+    #: Observation clock (rules 1.1, 3.8): last seen frame counters, the
+    #: engine time each channel was last observed, and the per-frame
+    #: move-energy freshness flag (4.2).
+    move_obs: int = 0
+    still_obs: int = 0
+    move_energy_obs: int = 0
+    move_obs_at: float | None = None
+    still_obs_at: float | None = None
+    move_energy_fresh: bool = False
 
 
 @dataclass(slots=True)
@@ -381,6 +408,9 @@ class StatBaseline:
     mu: float
     sigma: float
     clip_mu: float = 0.0
+    #: Estimated integrated autocorrelation time of the calibrated empty
+    #: process (rule 3.7); runtime scores divide by it (3.2).
+    tau: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)

@@ -201,10 +201,14 @@ async def enter_zone(hass: HomeAssistant, freezer, cluster: dict[str, str], dist
     )
     await advance(hass, freezer, 0.3)
     await set_states(hass, {cluster["move_energy"]: "81.0"})
+    await advance(hass, freezer, 0.4)
+    await set_states(hass, {cluster["move_energy"]: "82.0"})
 
 
 async def leave_zone(hass: HomeAssistant, cluster: dict[str, str]) -> None:
-    """The person is gone: energies back at the noise floor."""
+    """The person is gone: energies back at the noise floor. Real empty
+    streams keep churning at a ~2.5 s cadence (measured), which is what
+    carries the observed-absence drive (3.8)."""
     await set_states(
         hass,
         {
@@ -240,8 +244,10 @@ async def test_walk_through_produces_pass_by_and_no_settle(hass: HomeAssistant, 
     assert hass.states.get(ANYONE_HOME).state == "on"
 
     await leave_zone(hass, SOFAKROK)
-    for _ in range(15):  # decay + absence evidence release well within this
+    for i in range(15):  # observed absence releases well within this
         await advance(hass, freezer, 1.0)
+        if i % 3 == 2:  # the empty stream keeps churning at the floor
+            await set_states(hass, {SOFAKROK["still_energy"]: f"{2 + (i // 3) % 2}.0"})
 
     assert hass.states.get(OCC_SOFAKROK).state == "off"
     assert hass.states.get("sensor.presence_conductor_sofakrok_activity").state == "empty"
@@ -286,10 +292,10 @@ async def test_still_person_settles_the_room(hass: HomeAssistant, freezer) -> No
     )
     for i in range(35):  # t_settle = 30
         await advance(hass, freezer, 1.0)
-        if i % 10 == 9:
+        if i % 3 == 2:
             # The radar keeps reporting a (noisy) still target; without
             # frames the staleness watchdog would declare the sensor blind.
-            await set_states(hass, {KONTOR["still_energy"]: f"4{i % 3}.0"})
+            await set_states(hass, {KONTOR["still_energy"]: f"4{(i // 3) % 3}.0"})
 
     assert hass.states.get(OCC_KONTOR_PULT).state == "on"  # still occupied
     assert hass.states.get("sensor.presence_conductor_kontor_pult_activity").state == "settled"
@@ -324,7 +330,7 @@ async def test_occupied_sensor_dropout_bridges_through_unknown(
     assert hass.states.get(ANYONE_HOME).state == "on"
 
     # Recovery is immediate on the next frame (1.3) — outputs were held.
-    await set_states(hass, {KONTOR["move_energy"]: "82.0"})
+    await set_states(hass, {KONTOR["move_energy"]: "83.0"})
     assert hass.states.get(OCC_KONTOR_PULT).state == "on"
     assert hass.states.get(OCC_ROOM_KONTOR).state == "on"
 
@@ -455,6 +461,7 @@ GATED_OPTIONS: dict[str, Any] = {
         },
     ],
     "rooms": [{"room_id": "gates", "name": "Gates"}],
+    "tunables": {"use_gate_evidence": True},  # 2.6: experimental opt-in
     "baselines": {
         zone_id: {**TIGHT_BASELINE, "gates": {str(i): dict(TIGHT_BASELINE) for i in range(9)}}
         for zone_id in ("gates_near", "gates_far")

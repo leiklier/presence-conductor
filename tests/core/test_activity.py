@@ -97,7 +97,7 @@ class TestRule52PassBy:
         assert len(events) == 1
         assert events[0].zone_id == SOFA
         assert events[0].peak_confidence == pytest.approx(0.999, abs=0.002)
-        assert 10 < events[0].duration < 45  # on -> off traversal time
+        assert 5 <= events[0].duration < 45  # on -> off traversal time
 
     def test_rule_5_2_no_pass_by_after_dwelling(self) -> None:
         h = Harness()

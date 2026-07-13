@@ -55,15 +55,42 @@ def advance_zone(
     """Rule 4.1: integrate the evidence rate that was in force over ``dt``.
 
     Called before any event installs new evidence, so a frame's evidence is
-    never applied to time before its own arrival.
+    never applied to time before its own arrival. The rate is piecewise
+    constant with breakpoints where observation windows expire (3.8): the
+    interval is split at those absolute times and each segment integrates
+    exactly, so the result stays invariant to tick cadence.
     """
     if zst.health is not Health.OK:
         return  # 1.3: outputs hold their last state while UNKNOWN
     if zst.recording is not None:
         return  # 3.3: suspended while calibrating — belief pinned at prior
     t = engine.config.tunables
-    u = evidence.evidence_rate(zst, t)  # 3.2 (per second)
-    lam = belief.advance(zst.lam, engine.lam_prior, u, dt, t.tau_decay)  # 4.1
+    sensor = engine.state.sensors[zone.sensor_id]
+    start = now - dt
+    cuts = {start, now}
+    for obs_at in (sensor.move_obs_at, sensor.still_obs_at):
+        if obs_at is None:
+            continue
+        for window in (t.obs_budget, t.obs_hold):  # 3.8 expiry breakpoints
+            expiry = obs_at + window
+            if start < expiry < now:
+                cuts.add(expiry)
+    lam = zst.lam
+    boundaries = sorted(cuts)
+    for seg_start, seg_end in zip(boundaries, boundaries[1:], strict=False):
+        # Ages at the segment midpoint: u is constant inside a segment, and
+        # the midpoint never lands exactly on an expiry boundary, so the
+        # result is independent of how ticks slice the interval (4.1).
+        mid = (seg_start + seg_end) / 2.0
+        move_age = None if sensor.move_obs_at is None else mid - sensor.move_obs_at
+        still_age = None if sensor.still_obs_at is None else mid - sensor.still_obs_at
+        u = evidence.evidence_rate(zst, t, move_age, still_age)  # 3.2 / 3.8
+        lam = belief.advance(lam, engine.lam_prior, u, seg_end - seg_start, t.tau_decay)  # 4.1
+        # 4.5 applied per segment: the clamped trajectory rides the bound
+        # until u changes, so the result is cadence-invariant — clamping
+        # only at the end would let coarse schedules dive below the bound
+        # and recover differently than fine ones.
+        lam = belief.clamp(lam, engine.lam_min, engine.lam_max)
     set_lambda(engine, zone, zst, lam, now, plan)
 
 
@@ -88,7 +115,7 @@ def on_frame(engine: ConductorEngine, frame: SensorFrame, now: float, plan: Plan
         # Non-fresh frames carry no new move measurement (the adapter
         # re-emits its cached frame on any entity change) and leave the
         # chain untouched; elapsed time alone proves nothing.
-        if sensor.move_fresh:
+        if sensor.move_energy_fresh:
             if zst.attack_candidate:
                 last = zst.attack_last
                 if last is None or now - last > t.attack_gap_max:

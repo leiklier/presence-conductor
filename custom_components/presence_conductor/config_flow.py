@@ -76,6 +76,9 @@ _TUNABLE_UI: dict[str, tuple[float, float, float, str | None]] = {
     "z_neg_cap": (0, 5, 0.1, None),
     "stat_sigma_min": (0.05, 2, 0.05, None),
     "stat_min_rows": (2, 600, 1, None),
+    "tau_int_max": (1, 100, 1, None),
+    "obs_budget": (0.1, 10, 0.1, "s"),
+    "obs_hold": (0.5, 60, 0.5, "s"),
     "k_move": (0, 5, 0.05, None),
     "k_still": (0, 5, 0.05, None),
     "k_bias": (0, 5, 0.05, None),
@@ -92,7 +95,7 @@ _TUNABLE_UI: dict[str, tuple[float, float, float, str | None]] = {
     "z_motion": (0, 10, 0.1, None),
     "motion_hold": (0, 60, 0.5, "s"),
     "p_min": (0.0001, 0.1, 0.001, None),
-    "p_max": (0.9, 0.9999, 0.001, None),
+    "p_max": (0.5, 0.9999, 0.001, None),
     "distance_hold": (0, 300, 5, "s"),
     "p_background": (0.001, 0.5, 0.001, None),
     "t_background": (10, 3600, 10, "s"),
@@ -117,6 +120,9 @@ def _number(minimum: float, maximum: float, step: float, unit: str | None = None
 def _tunables_schema() -> vol.Schema:
     schema: dict[Any, Any] = {}
     for field in dataclasses.fields(Tunables):
+        if isinstance(field.default, bool):
+            schema[vol.Required(field.name, default=field.default)] = BooleanSelector()
+            continue
         minimum, maximum, step, unit = _TUNABLE_UI.get(field.name, _TUNABLE_FALLBACK_UI)
         schema[vol.Required(field.name, default=field.default)] = _number(
             minimum, maximum, step, unit

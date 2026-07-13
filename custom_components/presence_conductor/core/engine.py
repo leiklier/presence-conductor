@@ -140,7 +140,12 @@ class ConductorEngine:
             if frame is None:
                 continue
             # now=None (2.7): flag recency unknown at seed, so only flag-on
-            # distances gate.
+            # distances gate. Observation counters adopt without recency
+            # (1.1): channels stay silent until the first live frame.
+            sensor_state = state.sensors[sensor.sensor_id]
+            sensor_state.move_obs = frame.move_obs
+            sensor_state.still_obs = frame.still_obs
+            sensor_state.move_energy_obs = frame.move_energy_obs
             evidence.ingest_frame(self, frame, None)
             for zone in self.config.zones_for_sensor(sensor.sensor_id):
                 zst = state.zones[zone.zone_id]

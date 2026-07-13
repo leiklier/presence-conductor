@@ -90,11 +90,12 @@ class TestRule64Monotone:
     def test_rule_6_4_a_zone_never_vetoes_another(self) -> None:
         h = Harness()
         h.occupy(SOFAKROK)
-        p_sofa = h.zone(SOFA).confidence
         h.sustain_quiet(SPISEBORD, 10)  # strong absence at the other sensor
+        # Sofa saw no observations meanwhile, so its belief only relaxes
+        # toward the prior (3.8) — absence elsewhere never vetoes it (6.4).
+        assert h.zone(SOFA).occupied  # hysteresis holds through the decay
         assert h.room("stue").occupied is True
         assert h.room("stue").confidence >= h.zone(SOFA).confidence * 0.99
-        assert h.zone(SOFA).confidence == pytest.approx(p_sofa, abs=0.3)
 
 
 class TestRule65HomePresence:

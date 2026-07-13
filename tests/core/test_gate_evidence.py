@@ -11,6 +11,7 @@ from custom_components.presence_conductor.core.model import (
     ConductorConfig,
     GateBaselines,
     SensorConfig,
+    Tunables,
     ZoneConfig,
 )
 
@@ -33,8 +34,9 @@ from .harness import (
 
 def make_harness(**tunable_overrides: float) -> Harness:
     """Default config with every gate calibrated like the aggregates, so the
-    harness's raw-energy-to-z table applies to gate energies too."""
-    config = make_config(**tunable_overrides)
+    harness's raw-energy-to-z table applies to gate energies too. Gate
+    evidence is experimental (2.6): these tests opt in."""
+    config = make_config(use_gate_evidence=True, **tunable_overrides)
     return Harness(config, make_snapshot(config, gate_floors=calibrated_gate_floors(config)))
 
 
@@ -79,7 +81,7 @@ class TestRule25GateEvidence:
         assert h.zone(DESK).z_move == pytest.approx(centered_of(1.5, m=3))
 
     def test_rule_2_5_each_gate_scores_against_its_own_floor(self) -> None:
-        config = make_config()
+        config = make_config(use_gate_evidence=True)
         floors = calibrated_gate_floors(config)
         floors[DOOR] = {**floors[DOOR], 4: GateBaselines(0.40, 0.05, 0.40, 0.05)}
         h = Harness(config, make_snapshot(config, gate_floors=floors))
@@ -100,7 +102,7 @@ class TestRule25GateEvidence:
         assert h.zone(DOOR).occupied
 
     def test_rule_2_5_uncalibrated_gates_use_the_tunables_defaults(self) -> None:
-        config = make_config()
+        config = make_config(use_gate_evidence=True)
         h = Harness(config, make_snapshot(config))  # no persisted gate floors
         h.send_frame(KONTOR, gate_move=gate_tuple({1: 15}, fill=10.0))
         # default_mu 0.10, default_sigma 0.10: raw 10 -> 0, raw 15 -> S 0.5.
@@ -160,6 +162,7 @@ class TestRule26GatePrecedence:
         config = ConductorConfig(
             sensors=(SensorConfig(KONTOR, "Kontor", gate_size_cm=20.0),),
             zones=(ZoneConfig("far_zone", "Far", KONTOR, room_id="r", near_cm=500, far_cm=600),),
+            tunables=Tunables(use_gate_evidence=True),
         )
         h = Harness(config, make_snapshot(config))
         assert h.engine.owned_gates["far_zone"] == ()  # 2.4
@@ -183,7 +186,7 @@ class TestRule26GatePrecedence:
         assert h.zone(DESK).motion
 
     def test_rule_2_6_startup_adoption_is_spatial_with_gates(self) -> None:
-        config = make_config()
+        config = make_config(use_gate_evidence=True)
         snapshot = make_snapshot(
             config,
             gate_floors=calibrated_gate_floors(config),
@@ -224,7 +227,7 @@ class TestRule36PerGateFloors:
         assert h.persist_count == 1  # 3.3: baselines persist in the config entry
 
     def test_rule_3_6_adaptation_extends_per_gate_for_owned_gates(self) -> None:
-        config = make_config(t_background=60.0, tau_background=600.0)
+        config = make_config(use_gate_evidence=True, t_background=60.0, tau_background=600.0)
         h = Harness(config, make_snapshot(config, gate_floors=calibrated_gate_floors(config)))
         h.run(61)  # posterior below p_background since start: now eligible
         for _ in range(100):
@@ -238,7 +241,7 @@ class TestRule36PerGateFloors:
         assert desk.gate_move_baselines[5].mu == MU
 
     def test_rule_3_6_adaptation_freezes_the_moment_the_posterior_rises(self) -> None:
-        config = make_config(t_background=60.0, tau_background=600.0)
+        config = make_config(use_gate_evidence=True, t_background=60.0, tau_background=600.0)
         h = Harness(config, make_snapshot(config, gate_floors=calibrated_gate_floors(config)))
         h.run(61)
         h.send_frame(KONTOR, gate_move=gate_tuple({1: 35}))  # 4.2 candidate
@@ -255,7 +258,7 @@ class TestRule36PerGateFloors:
         """The headline improvement (3.6): a fan parked at door gate 4 whose
         elevated still floor was calibrated produces z = 0 at its own gate,
         so hours of fan energy never flip the zone."""
-        config = make_config()
+        config = make_config(use_gate_evidence=True)
         floors = calibrated_gate_floors(config)
         floors[DOOR] = {**floors[DOOR], 4: GateBaselines(MU, SIGMA, 0.40, 0.05)}
         h = Harness(config, make_snapshot(config, gate_floors=floors))
@@ -284,7 +287,7 @@ class TestRule36PerGateFloors:
         assert h.zone(DOOR).occupied  # z_still = 6 against the zone floor
 
     def test_rule_3_6_persisted_gate_floors_seed_the_engine(self) -> None:
-        config = make_config()
+        config = make_config(use_gate_evidence=True)
         floors = {DESK: {2: GateBaselines(0.2, 0.03, 0.3, 0.04)}}
         h = Harness(config, make_snapshot(config, gate_floors=floors))
         desk = h.zone(DESK)

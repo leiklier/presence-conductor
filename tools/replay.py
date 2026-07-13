@@ -230,6 +230,10 @@ class _SensorShadow:
         #: and reported" contract (rule 1.1).
         self.gates: dict[str, list[float | None] | None] = {"move": None, "still": None}
         self.available = True
+        #: Observation clock (rule 1.1), advanced per recorded entity change.
+        self.move_obs = 0
+        self.still_obs = 0
+        self.move_energy_obs = 0
 
     def set_gate(self, role: str, value: float | None) -> None:
         """Fold one per-gate update (``gate_move:3``) into the shadow."""
@@ -267,6 +271,9 @@ class _SensorShadow:
             has_still_target=_flag("has_still_target"),
             gate_move=None if gate_move is None else tuple(gate_move),
             gate_still=None if gate_still is None else tuple(gate_still),
+            move_obs=self.move_obs,
+            still_obs=self.still_obs,
+            move_energy_obs=self.move_energy_obs,
         )
 
 
@@ -308,7 +315,12 @@ def replay(
                 # Rule 3.7: optional statistic calibration, keyed like the
                 # config entry.
                 stats={
-                    key: StatBaseline(mu=s["mu"], sigma=s["sigma"], clip_mu=s.get("clip_mu", 0.0))
+                    key: StatBaseline(
+                        mu=s["mu"],
+                        sigma=s["sigma"],
+                        clip_mu=s.get("clip_mu", 0.0),
+                        tau=s.get("tau", 1.0),
+                    )
                     for key, s in (b.get("stats") or {}).items()
                 },
             )
@@ -366,6 +378,25 @@ def replay(
         sensor_id, role = entity_map[entity_id]
         shadow = shadows[sensor_id]
         parseable, value = _parse_state(role, state)
+        if parseable:
+            # 1.1 observation clock: every recorded change of a channel's
+            # entity is one reported measurement.
+            if role.startswith(f"{_GATE_ROLE_PREFIX}move") or role in (
+                "move_energy",
+                "moving_distance",
+                "has_moving_target",
+                "has_target",
+            ):
+                shadow.move_obs += 1
+            if role.startswith(f"{_GATE_ROLE_PREFIX}still") or role in (
+                "still_energy",
+                "still_distance",
+                "has_still_target",
+                "has_target",
+            ):
+                shadow.still_obs += 1
+            if role.startswith(f"{_GATE_ROLE_PREFIX}move") or role == "move_energy":
+                shadow.move_energy_obs += 1
         if role.startswith(_GATE_ROLE_PREFIX):
             # An unknown gate is normal (engineering mode off): the gate
             # goes None and sensor availability is untouched — rule 1.3

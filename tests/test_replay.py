@@ -64,17 +64,24 @@ def make_history() -> list[dict]:
         {"entity_id": "sensor.kontor_moving_distance", "state": "150", "last_changed": _at(20)},
         {"entity_id": "sensor.kontor_move_energy", "state": "60", "last_changed": _at(20)},
     ]
-    # t=25..80: sitting still, energies above the floor every 5 s.
-    for t in range(25, 81, 5):
+    # t=21: a second move reading confirms the attack (4.2).
+    history.append(
+        {"entity_id": "sensor.kontor_move_energy", "state": "61", "last_changed": _at(21)}
+    )
+    # t=25..80: sitting still - breathing wobbles the energy every 2 s
+    # (real occupied readings churn; only truly empty streams freeze, 3.8).
+    for t in range(25, 81, 2):
         history += [
-            {"entity_id": "sensor.kontor_still_energy", "state": "40", "last_changed": _at(t)},
-            {"entity_id": "sensor.kontor_still_distance", "state": "150", "last_changed": _at(t)},
             {
-                "entity_id": "binary_sensor.kontor_still_target",
-                "state": "on",
+                "entity_id": "sensor.kontor_still_energy",
+                "state": str(40 + (t % 4) // 2),
                 "last_changed": _at(t),
             },
         ]
+    history += [
+        {"entity_id": "sensor.kontor_still_distance", "state": "150", "last_changed": _at(25)},
+        {"entity_id": "binary_sensor.kontor_still_target", "state": "on", "last_changed": _at(25)},
+    ]
     # t=81: gone - everything back at the baseline.
     history += [
         {"entity_id": moving_target, "state": "off", "last_changed": _at(81)},
@@ -82,6 +89,16 @@ def make_history() -> list[dict]:
         {"entity_id": "sensor.kontor_move_energy", "state": "5", "last_changed": _at(81)},
         {"entity_id": "sensor.kontor_still_energy", "state": "5", "last_changed": _at(81)},
     ]
+    # The empty stream keeps churning at the floor (~3 s cadence, as
+    # measured on real hardware) — that carries the observed-absence drive.
+    for t in range(84, 120, 3):
+        history.append(
+            {
+                "entity_id": "sensor.kontor_still_energy",
+                "state": str(4 + (t % 6) // 3),
+                "last_changed": _at(t),
+            }
+        )
     # Quiet tail so the OFF interval closes long after the visit.
     history.append(
         {"entity_id": "sensor.kontor_move_energy", "state": "4", "last_changed": _at(310)}
@@ -133,6 +150,7 @@ def make_gated_replay_config() -> dict:
     sensor["gates_move"] = [f"sensor.kontor_g{i}_move_energy" for i in range(9)]
     sensor["gates_still"] = [f"sensor.kontor_g{i}_still_energy" for i in range(9)]
     sensor["gate_size_cm"] = 75.0
+    config["tunables"] = {"use_gate_evidence": True}  # 2.6: experimental opt-in
     config["baselines"]["kontor"]["gates"] = {
         str(i): {"move_mu": 0.05, "move_sigma": 0.05, "still_mu": 0.05, "still_sigma": 0.05}
         for i in range(9)
@@ -150,14 +168,23 @@ def make_gate_history() -> list[dict]:
         {"entity_id": f"sensor.kontor_g{i}_move_energy", "state": "5", "last_changed": _at(1)}
         for i in range(9)
     ]
-    # t=20: strong move at gate 2 - fast attack through the gate path (2.5).
+    # t=20/21: strong move at gate 2, twice - the confirmed fast attack
+    # rides the gate path (2.5, 4.2).
     history.append(
         {"entity_id": "sensor.kontor_g2_move_energy", "state": "60", "last_changed": _at(20)}
     )
-    # t=25..80: still returns at gate 2 hold the zone.
-    for t in range(25, 81, 5):
+    history.append(
+        {"entity_id": "sensor.kontor_g2_move_energy", "state": "61", "last_changed": _at(21)}
+    )
+    # t=25..80: still returns at gate 2 hold the zone (breathing wobble -
+    # real occupied streams churn, 3.8).
+    for t in range(25, 81, 2):
         history.append(
-            {"entity_id": "sensor.kontor_g2_still_energy", "state": "40", "last_changed": _at(t)}
+            {
+                "entity_id": "sensor.kontor_g2_still_energy",
+                "state": str(40 + (t % 4) // 2),
+                "last_changed": _at(t),
+            }
         )
     # t=81: gone - the gates back at the floor.
     history += [
@@ -174,6 +201,16 @@ def make_gate_history() -> list[dict]:
         }
         for i in range(9)
     ]
+    # The empty stream keeps churning at the floor (~3 s cadence, as
+    # measured on real hardware) — that carries the observed-absence drive.
+    for t in range(84, 120, 3):
+        history.append(
+            {
+                "entity_id": "sensor.kontor_still_energy",
+                "state": str(4 + (t % 6) // 3),
+                "last_changed": _at(t),
+            }
+        )
     # Quiet tail so the OFF interval closes long after the visit.
     history.append(
         {"entity_id": "sensor.kontor_move_energy", "state": "4", "last_changed": _at(310)}
