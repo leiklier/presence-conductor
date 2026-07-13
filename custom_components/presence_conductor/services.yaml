@@ -1,0 +1,17 @@
+record_baseline:
+  fields:
+    zone_id:
+      required: true
+      example: sofakrok
+      selector:
+        text:
+    duration:
+      required: false
+      example: 120
+      selector:
+        number:
+          min: 5
+          max: 3600
+          step: 1
+          unit_of_measurement: seconds
+          mode: box
