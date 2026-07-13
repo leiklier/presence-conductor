@@ -29,7 +29,7 @@ class PassBy(EmittedEvent):
     """A zone was traversed without dwelling (rule 5.2)."""
 
     zone_id: str
-    peak_probability: float
+    peak_confidence: float
     #: Seconds the zone was occupied (on -> off).
     duration: float
 

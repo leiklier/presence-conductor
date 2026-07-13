@@ -105,28 +105,44 @@ class Tunables:
     #: silent; deliberately wide so uncalibrated zones are conservative).
     default_mu: float = 0.10
     default_sigma: float = 0.10
-    #: Evidence-score cap (rule 3.2).
+    #: Centered-score clamp (rule 3.2): ``z_cap`` above, ``z_neg_cap`` below
+    #: (absence evidence is bounded so odd baselines cannot instantly unlatch).
     z_cap: float = 6.0
-    #: Per-second evidence weights (rule 3.2), scaled by tick interval.
-    k_move: float = 1.0
-    k_still: float = 0.6
-    k_absence: float = 0.4
+    z_neg_cap: float = 1.0
+    #: Floor for the statistic calibration's deviation ``s0`` (rule 3.7).
+    stat_sigma_min: float = 0.3
+    #: Per-second evidence weights and the always-subtracted absence bias
+    #: (rule 3.2): ``E[u | calibrated empty] <= -k_bias < 0``. The gains
+    #: bound the *variance* of the empty walk (see 3.2); genuine-entry
+    #: latching speed is set by ``u_cap``, not the gains.
+    k_move: float = 0.5
+    k_still: float = 0.3
+    k_bias: float = 0.4
+    #: Upward cap on the evidence rate (rule 3.2): one wild sample held for
+    #: a second must not out-accumulate a genuine entry.
+    u_cap: float = 3.0
     #: Departure-hazard relaxation time constant (rule 4.1).
     tau_decay: float = 90.0
-    #: Empty-state prior probability (rule 4.1).
+    #: Empty-state prior confidence (rule 4.1).
     p_prior: float = 0.02
-    #: Fast-attack trigger and floor (rule 4.2).
-    z_attack: float = 3.0
+    #: Fast-attack trigger (centered units), confirmation and floor (rule 4.2).
+    z_attack: float = 4.5
+    attack_confirm: int = 2
+    attack_gap_min: float = 0.3
+    attack_gap_max: float = 3.0
     p_attack: float = 0.95
-    #: Occupied hysteresis thresholds (rule 4.3), as probabilities.
+    #: Occupied hysteresis thresholds (rule 4.3), as confidences.
     theta_on: float = 0.80
     theta_off: float = 0.20
-    #: Motion channel trigger and hold (rule 4.4).
-    z_motion: float = 1.5
+    #: Motion channel trigger (centered units) and hold (rule 4.4).
+    z_motion: float = 2.0
     motion_hold: float = 5.0
-    #: Posterior clamp (rule 4.5), as probabilities.
+    #: Belief clamp (rule 4.5), as confidences.
     p_min: float = 0.001
     p_max: float = 0.999
+    #: How long a frozen distance stays usable after its target flag was
+    #: last on (rule 2.7).
+    distance_hold: float = 30.0
     #: Background adaptation (rule 3.4).
     p_background: float = 0.05
     t_background: float = 600.0
@@ -184,18 +200,28 @@ class ChannelStats:
     sigma: float
 
 
+@dataclass(frozen=True, slots=True)
+class BaselineRow:
+    """One tick-aligned calibration sample (rule 3.3): the sensor's cached
+    normalized energies, aggregate and per-gate, as a single snapshot."""
+
+    move_e: float | None
+    still_e: float | None
+    gate_move: tuple[float | None, ...] | None
+    gate_still: tuple[float | None, ...] | None
+
+
 @dataclass(slots=True)
 class BaselineRecording:
-    """Samples collected during a RecordBaseline window (rules 3.3, 3.6).
+    """Rows collected during a RecordBaseline window (rules 3.3, 3.6, 3.7).
 
-    Per-gate samples are keyed by owned gate index (rule 2.4); a gate that
-    reported nothing during the window simply has no key.
+    Rows are sampled on the tick clock, never per entity change (3.3):
+    entity-change sampling weights samples by publish frequency and tears
+    gate tuples across radar frames. Aligned rows are also what lets 3.7
+    score the post-aggregation statistic per sample.
     """
 
-    move_samples: list[float] = field(default_factory=list)
-    still_samples: list[float] = field(default_factory=list)
-    gate_move_samples: dict[int, list[float]] = field(default_factory=dict)
-    gate_still_samples: dict[int, list[float]] = field(default_factory=dict)
+    rows: list[BaselineRow] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -203,12 +229,12 @@ class ZoneState:
     """Mutable runtime state of a zone (owned by the engine).
 
     The published outputs (§0) are ``occupied``, ``motion``, ``activity``,
-    ``probability``, ``dwell_seconds`` and ``health``; the adapter reads
+    ``confidence``, ``dwell_seconds`` and ``health``; the adapter reads
     them after every ``submit``/``on_timer`` call. The remaining fields are
     engine internals.
     """
 
-    #: Occupancy posterior in log-odds (§0).
+    #: Occupancy belief accumulator (§0), log-odds form.
     lam: float
     #: Per-channel noise floors (rule 3.1); mutated by calibration (3.3)
     #: and background adaptation (3.4).
@@ -220,27 +246,36 @@ class ZoneState:
     #: ``Tunables`` defaults and zones that never see gate data stay empty.
     gate_move_baselines: dict[int, ChannelStats] = field(default_factory=dict)
     gate_still_baselines: dict[int, ChannelStats] = field(default_factory=dict)
+    #: Statistic calibration (rule 3.7): empty-room ``(m0, s0)`` of the raw
+    #: statistic per channel + path, keyed ``move_agg`` / ``move_gate`` /
+    #: ``still_agg`` / ``still_gate``. A missing key means the analytic
+    #: Gaussian fallback applies.
+    stat_cal: dict[str, ChannelStats] = field(default_factory=dict)
     # -- published outputs (§0) ----------------------------------------
     occupied: bool = False
     motion: bool = False
     activity: Activity = Activity.EMPTY
     dwell_seconds: float = 0.0
     health: Health = Health.OK
-    # -- evidence from the most recent frame (rules 2, 3.2). Values persist
-    # between frames: the device deduplicates identical publishes, so the
-    # last report remains the best estimate of the current signal.
+    # -- evidence from the most recent frame (rules 2, 3.2): centered
+    # scores, negative when the channel sits below its empty-room mean.
+    # Values persist between frames: the device deduplicates identical
+    # publishes, so the last report remains the best estimate of the
+    # current signal.
     z_move: float = 0.0
     z_still: float = 0.0
     move_gated: bool = False
     still_gated: bool = False
-    #: Whether the channel's current z came from gate evidence (rule 2.6);
-    #: the motion channel (4.4) keys off this to ignore the sensor-global
-    #: ``has_moving_target`` flag while gates say where the mover is.
+    #: Whether the channel's current score came from gate evidence (rule
+    #: 2.6); the motion channel (4.4) keys off this to ignore the sensor-
+    #: global ``has_moving_target`` flag while gates say where the mover is.
     move_from_gates: bool = False
     still_from_gates: bool = False
+    #: Fast-attack candidate timestamp (rule 4.2 confirmation).
+    attack_at: float | None = None
     # -- activity FSM internals (rule 5) --------------------------------
     occupied_since: float | None = None
-    peak_probability: float = 0.0
+    peak_confidence: float = 0.0
     still_dominant_since: float | None = None
     move_dominant_since: float | None = None
     # -- background adaptation internals (rule 3.4) ----------------------
@@ -250,9 +285,10 @@ class ZoneState:
     recording: BaselineRecording | None = None
 
     @property
-    def probability(self) -> float:
-        """Sigmoid of the posterior (§0). Stale while health is UNKNOWN
-        (rule 1.3); the adapter marks it accordingly."""
+    def confidence(self) -> float:
+        """Sigmoid of the belief (§0) — a monotone score, not a calibrated
+        probability (rule 8.7). Stale while health is UNKNOWN (rule 1.3);
+        the adapter marks it accordingly."""
         return sigmoid(self.lam)
 
 
@@ -262,6 +298,15 @@ class SensorState:
 
     available: bool = True
     last_frame_at: float | None = None
+    #: Last normalized energies seen from this sensor, cached for the
+    #: tick-aligned calibration rows (rule 3.3).
+    last_move_e: float | None = None
+    last_still_e: float | None = None
+    last_gate_move: tuple[float | None, ...] | None = None
+    last_gate_still: tuple[float | None, ...] | None = None
+    #: When each target flag was last observed on (rule 2.7 distance hold).
+    move_flag_at: float | None = None
+    still_flag_at: float | None = None
 
 
 @dataclass(slots=True)
@@ -272,7 +317,7 @@ class RoomState:
     occupied: bool | None = None
     #: Any healthy member zone's motion channel (rule 6.2).
     motion: bool | None = None
-    probability: float | None = None
+    confidence: float | None = None
     activity: Activity | None = None
     settled: bool | None = None
 
@@ -286,11 +331,11 @@ class EngineState:
     zones: dict[str, ZoneState] = field(default_factory=dict)
     sensors: dict[str, SensorState] = field(default_factory=dict)
     rooms: dict[str, RoomState] = field(default_factory=dict)
-    #: Home-level log-odds of "someone is in the apartment" (rule 6.5).
+    #: Home-level belief that someone is in the apartment (rule 6.5).
     lam_home: float = 0.0
     #: Published home presence; ``None`` when all zones are unhealthy (6.5).
     anyone_home: bool | None = False
-    home_probability: float | None = None
+    home_confidence: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +350,15 @@ class GateBaselines:
 
 
 @dataclass(frozen=True, slots=True)
+class StatBaseline:
+    """Persisted statistic calibration (rule 3.7) for one channel + path:
+    empty-room mean and deviation of the raw statistic ``S``."""
+
+    mu: float
+    sigma: float
+
+
+@dataclass(frozen=True, slots=True)
 class ZoneBaselines:
     """Persisted calibration for one zone (rule 3.3), normalized units."""
 
@@ -316,6 +370,10 @@ class ZoneBaselines:
     #: persisted before per-gate evidence existed simply have no gates —
     #: the schema is backward compatible in both directions.
     gates: Mapping[int, GateBaselines] = field(default_factory=dict)
+    #: Optional statistic calibration (rule 3.7), keyed ``move_agg`` /
+    #: ``move_gate`` / ``still_agg`` / ``still_gate``. Missing keys (and
+    #: pre-3.7 baselines) fall back to the analytic values.
+    stats: Mapping[str, StatBaseline] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

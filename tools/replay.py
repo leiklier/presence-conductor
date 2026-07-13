@@ -44,15 +44,17 @@ entities), each item shaped ``{"entity_id": ..., "state": ...,
 
 ``baselines``, ``tunables`` and the gate keys are optional. ``gates_move``/
 ``gates_still`` list per-gate energy entities by gate index (spec rules
-2.4-2.6); ``gate_size_cm`` (default 75.0, rule 2.4) and per-zone baseline
-``"gates"`` floors (rule 3.6) ride along. Distance entities are treated
-as ``None`` (rule 1.1) while the matching ``has_*_target`` binary is off,
-mirroring the adapter's frame contract; an ``unavailable``/``unknown``
-state on any of a sensor's aggregate entities marks the sensor unavailable
-until the next parseable update, while an unknown *gate* entity only blanks
-that gate — engineering mode dropping is normal, not sensor failure (rule
-2.6). Ticks are synthesized every ``tick_interval`` between recorded
-changes, and engine timers fire at their deadlines.
+2.4-2.6); ``gate_size_cm`` (default 75.0, rule 2.4), per-zone baseline
+``"gates"`` floors (rule 3.6) and ``"stats"`` statistic calibration (rule
+3.7) ride along. Frames carry the *last reported* value of every field
+exactly like the production adapter (rule 1.1) — distance freshness is the
+core's job (rule 2.7), so replay must not null distances on flag state. An
+``unavailable``/``unknown`` state on any of a sensor's aggregate entities
+marks the sensor unavailable until the next parseable update, while an
+unknown *gate* entity only blanks that gate — engineering mode dropping is
+normal, not sensor failure (rule 2.6). Ticks are synthesized every
+``tick_interval`` between recorded changes, and engine timers fire at
+their deadlines.
 
 Pure Python: imports only the core package and the standard library.
 """
@@ -98,6 +100,7 @@ from custom_components.presence_conductor.core.model import (  # noqa: E402
     InitialSnapshot,
     RoomConfig,
     SensorConfig,
+    StatBaseline,
     Tunables,
     ZoneBaselines,
     ZoneConfig,
@@ -242,22 +245,19 @@ class _SensorShadow:
         def _flag(role: str) -> bool:
             return bool(v.get(role) or False)
 
-        def _distance(role: str, flag_role: str) -> float | None:
+        def _distance(role: str) -> float | None:
+            # Rule 1.1: the last reported value, verbatim — identical to the
+            # production adapter's cached view. Freshness is the core's job
+            # (rule 2.7).
             distance = v.get(role)
-            if distance is None:
-                return None
-            # Rule 1.1: no target of that kind -> no distance. Only enforced
-            # when the flag entity is actually mapped and reporting False.
-            if v.get(flag_role) is False:
-                return None
-            return float(distance)
+            return None if distance is None else float(distance)
 
         gate_move = self.gates["move"]
         gate_still = self.gates["still"]
         return SensorFrame(
             sensor_id=sensor_id,
-            moving_distance_cm=_distance("moving_distance", "has_moving_target"),
-            still_distance_cm=_distance("still_distance", "has_still_target"),
+            moving_distance_cm=_distance("moving_distance"),
+            still_distance_cm=_distance("still_distance"),
             move_energy=None if v.get("move_energy") is None else float(v["move_energy"]),
             still_energy=None if v.get("still_energy") is None else float(v["still_energy"]),
             has_target=_flag("has_target")
@@ -304,6 +304,12 @@ def replay(
                         still_sigma=g["still_sigma"],
                     )
                     for index, g in (b.get("gates") or {}).items()
+                },
+                # Rule 3.7: optional statistic calibration, keyed like the
+                # config entry.
+                stats={
+                    key: StatBaseline(mu=s["mu"], sigma=s["sigma"])
+                    for key, s in (b.get("stats") or {}).items()
                 },
             )
             for zone_id, b in (baselines or {}).items()

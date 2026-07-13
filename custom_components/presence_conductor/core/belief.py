@@ -1,8 +1,9 @@
-"""Log-odds numerics for the occupancy posterior (spec §0).
+"""Numerics for the occupancy belief (spec §0).
 
-All evidence arithmetic happens in the log-odds domain: ``lambda`` is the
-log-odds of "zone is occupied" and ``probability = sigmoid(lambda)``. These
-helpers are the only place the logit/sigmoid transforms live.
+All evidence arithmetic happens in the lambda domain: ``lambda`` is the
+zone's bounded evidence accumulator (log-odds *form*, no posterior claim,
+rule 8.7) and ``confidence = sigmoid(lambda)``. These helpers are the only
+place the logit/sigmoid transforms live.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ def clamp(lam: float, lo: float, hi: float) -> float:
 
 
 def decay_toward(lam: float, target: float, dt: float, tau: float) -> float:
-    """Relax ``lam`` toward ``target`` with time constant ``tau`` (rule 4.1).
+    """Relax ``lam`` toward ``target`` with time constant ``tau`` (rule 6.5).
 
     Exact exponential relaxation over ``dt`` seconds, so the result is
     independent of how ``dt`` is chopped into ticks (rule 7.3 determinism).
@@ -38,3 +39,17 @@ def decay_toward(lam: float, target: float, dt: float, tau: float) -> float:
     if dt <= 0.0:
         return lam
     return target + (lam - target) * math.exp(-dt / tau)
+
+
+def advance(lam: float, prior: float, u: float, dt: float, tau: float) -> float:
+    """Integrate ``dlambda/dt = -(lambda - prior)/tau + u`` over ``dt`` (4.1).
+
+    Exact constant-input solution: ``lam`` relaxes toward the equilibrium
+    ``prior + tau * u``. Exactness (not decay-then-add splitting) is what
+    makes the result invariant to how an interval is chopped into ticks
+    (rule 4.1); ``u = 0`` reduces to :func:`decay_toward`.
+    """
+    if dt <= 0.0:
+        return lam
+    equilibrium = prior + tau * u
+    return equilibrium + (lam - equilibrium) * math.exp(-dt / tau)

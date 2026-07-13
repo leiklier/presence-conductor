@@ -1,9 +1,10 @@
 """The occupancy filter (spec rule 4).
 
-Owns every posterior change: the per-tick log-odds update with decay toward
-the prior (4.1), the fast-attack path on strong gated move evidence (4.2),
-the occupied hysteresis (4.3), the low-latency motion channel (4.4), and
-the clamp (4.5). There is no fixed occupancy timeout anywhere in the engine
+Owns every belief change: the chronological, exact constant-input
+integration of the evidence rate with decay toward the prior (4.1), the
+confirmed fast-attack path on strong gated move evidence (4.2), the
+occupied hysteresis (4.3), the low-latency motion channel (4.4), and the
+clamp (4.5). There is no fixed occupancy timeout anywhere in the engine
 (4.1); the decay implements the hazard of departure.
 """
 
@@ -28,7 +29,7 @@ def set_lambda(
     now: float,
     plan: Plan,
 ) -> None:
-    """Assign a new posterior and run everything keyed to it."""
+    """Assign a new belief and run everything keyed to it."""
     zst.lam = belief.clamp(lam, engine.lam_min, engine.lam_max)  # 4.5
     if not zst.occupied and zst.lam >= engine.lam_on:  # 4.3: on at theta_on
         zst.occupied = True
@@ -38,12 +39,12 @@ def set_lambda(
         activity.on_vacated(zone, zst, now, plan)
     # Between thresholds the binary holds (4.3).
     if zst.occupied:
-        # Peak probability for the pass_by payload (5.2).
-        zst.peak_probability = max(zst.peak_probability, zst.probability)
+        # Peak confidence for the pass_by payload (5.2).
+        zst.peak_confidence = max(zst.peak_confidence, zst.confidence)
     evidence.update_background_clock(engine, zst, now)  # 3.4 freeze clock
 
 
-def tick_zone(
+def advance_zone(
     engine: ConductorEngine,
     zone: ZoneConfig,
     zst: ZoneState,
@@ -51,12 +52,16 @@ def tick_zone(
     now: float,
     plan: Plan,
 ) -> None:
-    """Rule 4.1: ``lambda <- decay(lambda) + llr * dt`` per tick."""
+    """Rule 4.1: integrate the evidence rate that was in force over ``dt``.
+
+    Called before any event installs new evidence, so a frame's evidence is
+    never applied to time before its own arrival.
+    """
     if zst.health is not Health.OK:
         return  # 1.3: outputs hold their last state while UNKNOWN
     t = engine.config.tunables
-    lam = belief.decay_toward(zst.lam, engine.lam_prior, dt, t.tau_decay)  # 4.1
-    lam += evidence.llr(zst, t) * dt  # 4.1 / 3.2 (per second, scaled by dt)
+    u = evidence.evidence_rate(zst, t)  # 3.2 (per second)
+    lam = belief.advance(zst.lam, engine.lam_prior, u, dt, t.tau_decay)  # 4.1
     set_lambda(engine, zone, zst, lam, now, plan)
 
 
@@ -64,18 +69,34 @@ def on_frame(engine: ConductorEngine, frame: SensorFrame, now: float, plan: Plan
     """Frame-side filter work: fast attack (4.2) and motion (4.4).
 
     Runs after :func:`.evidence.ingest_frame` stored this frame's evidence,
-    so ``z_move``/gating reflect the frame being processed.
+    so the scores/gating reflect the frame being processed — and after the
+    engine advanced time to ``now`` (4.1), so the attack floor lands on an
+    up-to-date belief.
     """
     t = engine.config.tunables
     for zone in engine.config.zones_for_sensor(frame.sensor_id):
         zst = engine.state.zones[zone.zone_id]
-        # 4.2: strong gated move evidence floors the posterior immediately -
-        # not waiting for the next tick. This is the lights-on path. Under
-        # gate precedence (2.6) z_move is the max owned-gate z and the gated
-        # flag is spatial, so the attack fires on whichever move z the frame
-        # produced.
+        # 4.2: strong gated move evidence floors the belief immediately -
+        # not waiting for the next tick - once *confirmed*: a single frame
+        # is a max-over-gates excursion empty noise produces routinely
+        # (3.2); two, separated by a real radar interval, is a mover. This
+        # is the lights-on path. Under gate precedence (2.6) the score is
+        # the centered owned-gate max and the gated flag is spatial, so the
+        # attack fires on whichever move score the frame produced.
         if zst.move_gated and zst.z_move >= t.z_attack:
-            set_lambda(engine, zone, zst, max(zst.lam, engine.lam_attack), now, plan)  # 4.2
+            first = zst.attack_at
+            # 1 µs absorbs float noise in the gap arithmetic: timestamps are
+            # large monotonic values whose difference can land just under
+            # the gap (float granularity near 2e9 is ~2.4e-7 s).
+            confirmed = t.attack_confirm <= 1 or (
+                first is not None and t.attack_gap_min - 1e-6 <= now - first <= t.attack_gap_max
+            )
+            if first is None or now - first > t.attack_gap_max:
+                zst.attack_at = now  # 4.2: candidate (re)armed
+            if confirmed:
+                set_lambda(engine, zone, zst, max(zst.lam, engine.lam_attack), now, plan)
+        else:
+            zst.attack_at = None  # 4.2: a non-qualifying frame clears
         # 4.4: gated, undamped fast channel. Under gate precedence (2.6) the
         # sensor-global has_moving_target flag is not zone evidence - the
         # owned gates already say where the mover is.
