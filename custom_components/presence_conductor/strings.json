@@ -315,7 +315,7 @@
         },
         "duration": {
           "name": "Duration",
-          "description": "Collection window in seconds. Defaults to the 'Baseline duration' tunable (120 s)."
+          "description": "Collection window in seconds. Defaults to the 'Baseline duration' tunable (300 s). The outcome — committed or rejected with per-channel coverage — fires as the zone's calibration event entity and the presence_conductor_baseline_recorded bus event."
         }
       }
     }

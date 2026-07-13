@@ -53,12 +53,28 @@ full output set even though they fuse into one room.
   values alone cannot say which measurement is new: the frame also carries
   an explicit **observation clock** — three monotonic counters,
   `move_obs` / `still_obs` (incremented whenever any entity of that
-  channel receives a reported update, *including* a same-value forced
-  re-publication such as the still-energy heartbeat — the radar
-  re-measured and got the same number) and `move_energy_obs` (move-energy
-  or gate-move entities only, consumed by 4.2). The engine keys held-value
-  handling (3.8) and attack freshness (4.2) on these counters, never on
-  value comparison. Energies are 0–100, `None` when unknown. `gate_move`/`gate_still` carry the
+  channel receives a reported update — energy, distance, or target flag;
+  the shared `target` flag observes both channels — *including* a
+  same-value forced re-publication) and `move_energy_obs` (move-energy
+  or gate-move entities **only**, consumed by 4.2: the rare-tail attack
+  chain accepts nothing but actual energy measurements). Counting a
+  distance/flag update as an observation of the channel's cached energy
+  asserts a **verified firmware guarantee**: the LD2410 reports every
+  field in one atomic hardware frame, and the deployed per-entity
+  filters are throttle-only (~1 s), so a *changed* energy republishes
+  within the throttle period — any radar entity publication therefore
+  certifies an unchanged energy state as the current measurement.
+  Measured on 24 h of live data, 33–90% of still-distance updates arrive
+  with no still-energy update within ±1.5 s: under the guarantee those
+  are deduplication plateaus of a re-measured value, not missing
+  measurements, and treating them as silence starves the estimator
+  during real occupancy (replayed: kontor 93 → 189 transitions/day).
+  Firmware modes that suppress or delta-filter energy publications
+  (Apollo's `reduce_db_reporting` switch — verified **off** on every
+  deployed sensor) void the certification and are **unsupported**:
+  deployments must keep energy reporting unfiltered (the 8.1 overlay
+  pins this). The engine keys held-value handling (3.8) and attack
+  freshness (4.2) on these counters, never on value comparison. Energies are 0–100, `None` when unknown. `gate_move`/`gate_still` carry the
   per-gate energies of engineering mode (2.4–2.6): nine elements — one per
   LD2410 distance gate `g0..g8` — with `None` for gates the device does not
   currently report; the whole tuple is `None` when the sensor has no gate
@@ -165,12 +181,25 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   by 25–40%, and *every* future score is inflated by that error — an
   underestimated scale is a hazard, not a calibration. So
   `sigma = MAD_TO_SIGMA · (UCB(median |deviation|) + energy_quantum / 2)`,
-  floored by `sigma_min`, where `UCB` is the one-sided 95% upper
-  confidence bound for a median: the k-th order statistic of the absolute
-  deviations with `k = ceil(n/2 + 1.645 · n / (2 · sqrt(n_eff)))`, where
+  floored by `sigma_min`, where `UCB` is the one-sided upper confidence
+  bound for a median: the k-th order statistic of the absolute deviations
+  with `k = ceil(n/2 + z · n / (2 · sqrt(n_eff)))`, where
   `n_eff = n(1 − ρ̂)/(1 + ρ̂)` discounts the trial count for dependence
   (`ρ̂` at its own upper bound; independent samples give back
-  `sqrt(n)/2`). The samples are the window's **distinct observations** —
+  `z · sqrt(n)/2`). **Family-wise coverage:** the confidence level must be
+  simultaneous across every floor that feeds one decision statistic. The
+  aggregate statistic uses one floor, so its fits use the one-sided 95%
+  quantile (`z = 1.645`); the gate statistic is a max over the zone's `m`
+  owned gates, and the probability that *at least one* of `m` independent
+  95% fits underestimates its scale approaches `1 − 0.95^m` — for nine
+  gates the *minimum* fitted scale is typically below the true one, and
+  the max statistic hands every future frame to whichever gate underfit
+  (measured: 9-gate AR(1) calibrations fit a minimum gate sigma of 0.037
+  vs the true 0.05, and the resulting tail inflation produced false fast
+  attacks). Per-gate fits therefore use the Bonferroni-adjusted quantile
+  `z = Φ⁻¹(1 − 0.05/m)`, keeping the family-wise underestimation
+  probability at ~5% per channel. The samples are the window's
+  **distinct observations** —
   consecutive duplicate values are collapsed first, because
   held/deduplicated rows repeat one measurement and a rank bound computed
   over repeats overstates its confidence. A channel whose distinct samples span at most one quantum is
@@ -181,7 +210,14 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   rank-based UCB assumes the distinct observations are independent draws
   (3.7's dependence estimate discounts them when they are not); the
   1.4826 MAD-to-sigma conversion and the analytic attack tail (4.2) assume
-  approximately Gaussian empty noise.
+  approximately Gaussian empty noise. The `ρ̂` upper bound and the
+  `n_eff` discount are **conservative engineering approximations under
+  dependence, not demonstrated confidence bounds**: their coverage is
+  validated empirically over the supported process family (IID, held,
+  quantized AR(1) up to ρ = 0.9 — the seeded null sweeps in the test
+  suite), and no formal tail guarantee is claimed from them; the fast
+  attack's protection against residual scale error comes from 4.2's
+  dependence-aware confirmation, not from the UCB alone.
 - **3.2 Evidence score.** Per frame and channel, the **raw statistic** `S`
   is the one-sided deviation from the noise floor: on the gate path,
   `S = max over owned gates of max(0, (energy_g − mu_g) / sigma_g)` (2.5);
@@ -226,18 +262,41 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   candidate (4.2), and the attack path carries its own confirmation. The
   downward rate is already bounded by `z_neg_cap`.
 - **3.3 Baseline calibration.** `RecordBaseline(zone_id, duration)` (service/
-  button, default 120 s) opens a collection window. Collection is sampled at
-  the tick clock — **one aligned row per tick** (aggregate energies plus the
-  zone's owned-gate energies as one snapshot) — never per entity change:
-  entity-change sampling weights samples by publish frequency and tears gate
-  tuples across radar frames. The window replaces `(mu, sigma)` (3.1, 3.6)
-  and the statistic calibration (3.7). The operator asserts emptiness; the
-  engine uses robust statistics so brief violations don't poison the
-  baseline. Baselines persist in the config entry.
-  **Coverage:** a window with fewer than `stat_min_rows` rows replaces
-  *nothing* — floors included — and an individual channel or gate whose
-  column has fewer than `stat_min_rows` samples keeps its previous floor:
-  a scale cannot be certified from a handful of points (3.1).
+  button, default `baseline_duration` = 300 s) opens a collection window.
+  Collection is sampled at the tick clock — **one aligned row per tick**
+  (aggregate energies plus the zone's owned-gate energies as one snapshot)
+  — never per entity change: entity-change sampling weights samples by
+  publish frequency and tears gate tuples across radar frames. The
+  operator asserts emptiness; the engine uses robust statistics so brief
+  violations don't poison the baseline. The default duration is sized to
+  the **measured** reporting cadence, not the tick clock: live empty
+  still streams update every ~2.5 s, so 120 s yields only ~48 fresh
+  observations — below `stat_min_rows` — while 300 s yields ~120 with
+  margin.
+  **Transactional coverage:** the window computes a *candidate*
+  calibration — floors (3.1, 3.6) and statistics (3.7) — and a per-path
+  coverage verdict **before mutating any zone state**. Each of the four
+  paths (`move_agg`/`still_agg`/`move_gate`/`still_gate`) is classified:
+  `calibrated` (enough distinct observations for a floor and enough fresh
+  rows for a statistic), `quiescent` (the channel's values span at most
+  one quantum over at least `stat_min_rows` rows — the empty signal
+  simply never moves; floor `(median, sigma_min)`, analytic statistic —
+  accepted and *reported as such*), `no_data` (the channel never reported
+  during the window; nothing to calibrate, previous values kept), or
+  `rejected` (data present but too few fresh/distinct observations, with
+  the counts as the reason). **Required paths** are the aggregates plus,
+  iff `use_gate_evidence` is on and the zone owns gates, the gate paths.
+  The commit is **atomic**: if any required path is `rejected`, *nothing*
+  is applied — the previous floors and the previous statistic calibration
+  survive untouched, nothing is persisted, and the outcome reports
+  failure. A rejected window must never silently clear a valid
+  calibration or half-apply one. Only a committed window persists.
+  **Observability:** every window close emits `BaselineRecorded` with
+  `success`, the per-path coverage (status, row/fresh/distinct counts,
+  rejection reason) and the committed floors; the adapter surfaces it as
+  a Home Assistant event and a per-zone diagnostic event entity, and logs
+  rejections as warnings — the calibration button must never look
+  successful when a required channel was not calibrated.
   **Lifecycle:** while the window is open the zone's estimator is
   **suspended** — the operator has asserted emptiness, so scoring the
   incoming frames against the old (possibly wrong) floors would let the
@@ -294,7 +353,8 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   gate count (and by `stat_sigma_min`, default 0.3). Empirical calibration
   may *recentre* the score (deduplicated real traffic sits well below the
   Gaussian mean) but may never *sharpen* it beyond the analytic scale:
-  a 120 s window simply cannot certify a smaller-than-Gaussian tail.
+  a minutes-long window simply cannot certify a smaller-than-Gaussian
+  tail.
   Persisted alongside the floors (optional keys; older baselines load
   without them). When a path has no accepted empirical calibration the
   engine falls back to the **analytic** values for
@@ -307,13 +367,16 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   Statistics are computed over the window's **fresh rows** only (rows on
   which the path's observation counter advanced, 1.1); the lag-1
   autocorrelation `ρ̂` of that fresh sequence — taken at its one-sided
-  95% upper confidence bound, since a strongly dependent window holds few
-  independent samples and an underestimated discount under-protects —
-  yields `τ̂ = clamp((1 + ρ̂)/(1 − ρ̂), 1, tau_int_max)` (AR(1)
+  upper bound, since a strongly dependent window holds few independent
+  samples and an underestimated discount under-protects (like 3.1's, a
+  conservative engineering approximation validated empirically, not a
+  formal confidence bound) — yields
+  `τ̂ = clamp((1 + ρ̂)/(1 − ρ̂), 1, tau_int_max)` (AR(1)
   assumption, `tau_int_max` default 25), stored with the statistic and
-  applied at runtime (3.2). A path whose fresh rows fall below `stat_min_rows` keeps
-  the analytic fallback — if that happens, the room's traffic is too
-  deduplicated for a 120 s window: re-run with a longer `duration`.
+  applied at runtime by 3.2's score division **and** by 4.2's
+  confirmation spacing. A path whose fresh rows fall below `stat_min_rows`
+  keeps the analytic fallback — the transactional coverage rules (3.3)
+  decide whether the window as a whole commits.
 - **3.8 Held evidence and the observation clock.** The integrator (4.1)
   consumes evidence only while it is *observationally live*, per channel:
   a **positive** centered score integrates for at most `obs_budget`
@@ -367,17 +430,35 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   (default corresponding to a confidence of 0.95), immediately, not
   waiting for a tick — once `attack_confirm` (default 2) qualifying
   **fresh move observations** have arrived, consecutive ones separated by
-  at least `attack_gap_min` (default 0.3 s) and at most `attack_gap_max`
-  (default 3 s). *Fresh* means the frame's `move_energy_obs` counter
-  (1.1) advanced — a new move-energy or gate-move measurement was
-  actually reported. The adapter re-emits its complete cached frame on
+  at least `g` and at most `G`. Under the analytic fallback (`τ̂ = 1`)
+  these are the raw tunables: `g = attack_gap_min` (default 0.3 s),
+  `G = attack_gap_max` (default 3 s). When the path in force carries a
+  **calibrated dependence estimate** `τ̂ > 1` (3.7), the spacing scales
+  with it: `g = max(attack_gap_min, τ̂)` and
+  `G = attack_gap_max · g / attack_gap_min`. Rationale: confirmation is
+  meant to *square* the per-observation tail, which requires the
+  confirming observations to be approximately independent under H0. For
+  AR(1) empty noise the correlation at spacing `s` is `ρ^s` and
+  `τ̂ = (1 + ρ)/(1 − ρ)`, so spacing `g = τ̂` leaves residual
+  correlation `ρ^τ̂ ≈ e⁻²` — two exceedances 1 s apart at ρ = 0.9 are
+  by contrast essentially *one* tail event, and confirmation collapses
+  to candidacy (measured: 2/200 false-occupied hours through the attack
+  path on 9-gate ρ = 0.9 noise, zero through the accumulator). The cost
+  is honest latency: in a room whose *empty* noise is that dependent,
+  the information rate is genuinely ~τ̂ times lower. Field-calibrated
+  aggregate move channels are quiescent when empty (`τ̂ = 1`), so
+  production entry latency is unchanged. *Fresh* means the frame's
+  `move_energy_obs` counter (1.1) advanced — a new move-energy or
+  gate-move measurement was actually reported. The adapter re-emits its complete cached frame on
   **any** entity change, so an unrelated update (a still-energy
   heartbeat, a churning distance) re-presents a held move spike without
   any new measurement behind it — elapsed time alone proves nothing, and
   value comparison is the wrong proxy (a forced same-value
   re-publication IS a new measurement; a burst of per-gate entity
-  updates from one radar frame is one). `attack_gap_min` additionally
-  collapses that burst. Non-fresh
+  updates from one radar frame is one). The spacing floor `g`
+  additionally collapses that burst: qualifying observations closer than
+  `g` to the last counted one are ignored — never double-counted, never
+  a reset. Non-fresh
   frames leave the attack state untouched; a fresh non-qualifying move
   observation resets the count. One observation is a max-over-gates
   excursion that empty-room noise produces routinely (3.2); N fresh ones,
@@ -521,15 +602,20 @@ A per-zone FSM driven by the occupancy belief and channel dominance:
   upgrade — a two-state HMM with transition hazards and an emission model
   learned from labeled empty/occupied data, plus reliability-curve
   validation before any output is again called a probability — is roadmap,
-  as are: calibration quality gates (minimum coverage, contamination
-  rejection, staleness diagnostics), sensor-scoped gate floors shared
-  between zones, recovery from sustained upward background shifts, labeled
-  replay metrics (false-occupied minutes per empty hour, entry/exit latency
+  as are: contamination rejection and staleness diagnostics for
+  calibration (minimum-coverage gates ship as 3.3's transactional
+  verdicts), sensor-scoped gate floors shared between zones, recovery
+  from sustained upward background shifts, labeled replay metrics
+  (false-occupied minutes per empty hour, entry/exit latency
   percentiles), and a bounded synchronized frame-capture facility for
   evaluating the production gate path (which also gates flipping
   `use_gate_evidence` on by default, 2.6). Temporal-model assumptions
   (3.7, 3.8): dependence is treated as AR(1)-like with a clamped
   integrated autocorrelation time estimated from the calibration window;
-  the observation clock treats each reported update as one measurement.
-  Cross-gate and move/still cross-correlation are not modeled beyond the
-  max-statistic calibration.
+  the observation clock treats each reported update as one measurement
+  of its channel under the verified atomic-frame firmware guarantee
+  (1.1), with the attack path restricted to actual energy publications
+  (4.2). Cross-gate and move/still
+  cross-correlation are not modeled beyond the max-statistic calibration;
+  the dependence bounds of 3.1/3.7 are empirically validated
+  approximations (no formal coverage theorem is claimed).

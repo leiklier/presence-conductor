@@ -410,10 +410,11 @@ async def test_entity_inventory_spans_hub_and_room_devices(
     registry = er.async_get(hass)
     entries = er.async_entries_for_config_entry(registry, entry.entry_id)
     # 3 zones x (occupancy, motion, activity, confidence, dwell, pass-by,
-    # record baseline) + 2 rooms x (occupancy, motion, settled, activity,
-    # confidence, pass-by) + anyone_home + home confidence + enabled +
-    # state. Disabled-by-default zone entities are registered like the rest.
-    assert len(entries) == 3 * 7 + 2 * 6 + 4
+    # calibration outcome, record baseline) + 2 rooms x (occupancy, motion,
+    # settled, activity, confidence, pass-by) + anyone_home + home
+    # confidence + enabled + state. Disabled-by-default zone entities are
+    # registered like the rest.
+    assert len(entries) == 3 * 8 + 2 * 6 + 4
     # Hub + one device per room; the layout itself is tests/test_devices.py.
     assert len({e.device_id for e in entries}) == 3
 

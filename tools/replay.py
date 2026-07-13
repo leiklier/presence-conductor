@@ -380,7 +380,10 @@ def replay(
         parseable, value = _parse_state(role, state)
         if parseable:
             # 1.1 observation clock: every recorded change of a channel's
-            # entity is one reported measurement.
+            # entity is one reported measurement — valid under the verified
+            # firmware guarantee (atomic radar frames, throttle-only
+            # filters), exactly as in the live adapter. The attack counter
+            # stays energy-only (4.2).
             if role.startswith(f"{_GATE_ROLE_PREFIX}move") or role in (
                 "move_energy",
                 "moving_distance",

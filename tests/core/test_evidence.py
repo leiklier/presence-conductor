@@ -8,6 +8,7 @@ from custom_components.presence_conductor.core import timers
 from custom_components.presence_conductor.core.belief import advance
 from custom_components.presence_conductor.core.events import RecordBaseline
 from custom_components.presence_conductor.core.evidence import robust_stats
+from custom_components.presence_conductor.core.model import Coverage, StatBaseline
 
 from .harness import (
     DESK,
@@ -134,10 +135,12 @@ class TestRule33BaselineCalibration:
         assert events[0].zone_id == DESK
         assert events[0].move_mu == desk.move_baseline.mu
 
-    def test_rule_3_3_default_duration_is_120s(self) -> None:
+    def test_rule_3_3_default_duration_is_300s(self) -> None:
+        # 3.3: sized to the measured ~2.5 s empty cadence — 120 s yields
+        # only ~48 fresh observations, below stat_min_rows.
         h = Harness()
         h.submit(RecordBaseline(DESK))
-        assert h.deadlines[timers.baseline_end(DESK)] == pytest.approx(120.0)
+        assert h.deadlines[timers.baseline_end(DESK)] == pytest.approx(300.0)
 
     def test_rule_3_3_empty_window_keeps_old_floor(self) -> None:
         h = Harness()
@@ -146,12 +149,101 @@ class TestRule33BaselineCalibration:
         desk = h.zone(DESK)
         assert desk.move_baseline.mu == pytest.approx(MU)
         assert h.persist_count == 0
-        assert h.baseline_events() == []
+        # 3.3 observability: even a void window reports its outcome —
+        # nothing materialized, so the commit is a failure, not a success.
+        (event,) = h.baseline_events()
+        assert event.success is False
+        assert event.frame_count == 0
 
     def test_rule_3_3_unknown_zone_ignored(self) -> None:
         h = Harness()
         plan = h.submit(RecordBaseline("nope", duration=10.0))
         assert plan.timer_starts == []
+
+
+class TestRule33TransactionalCalibration:
+    """Round-5 review regressions (rule 3.3): a window computes candidate
+    + coverage before mutating anything, commits atomically, and must
+    never look successful when a required channel was not calibrated."""
+
+    @staticmethod
+    def drive(h: Harness, duration: float | None, *, seed: int = 1) -> None:
+        """The measured production shape: a fresh still observation every
+        ~2.5 s (quantized N(20, 5)), move energy quiescent (frozen value,
+        no fresh observations), one frame + one tick per second."""
+        import random
+
+        rng = random.Random(seed)
+        h.submit(RecordBaseline(DESK) if duration is None else RecordBaseline(DESK, duration))
+        zone = h.zone(DESK)
+        still_val, next_still = 20.0, 0.0
+        start = h.now
+        while zone.recording is not None:
+            fresh_still = h.now - start + 1e-9 >= next_still
+            if fresh_still:
+                still_val = float(max(0, min(100, round(rng.gauss(20, 5)))))
+                next_still += 2.5
+            h.send_frame(
+                KONTOR,
+                move_e=3.0,
+                still_e=still_val,
+                fresh_move=False,
+                fresh_still=fresh_still,
+                fresh_move_energy=False,
+            )
+            h.step_to(h.now + 1.0)
+
+    def test_short_window_at_measured_cadence_rejects_atomically(self) -> None:
+        """The round-5 blocker: 120 s at the 2.5 s cadence yields ~48 fresh
+        still observations — the still path is rejected, and the rejection
+        must preserve the *entire* previous calibration, persist nothing
+        and report failure (not silently clear stat_cal and claim success)."""
+        h = Harness()
+        zone = h.zone(DESK)
+        good = {
+            "move_agg": StatBaseline(0.4, 0.6, 0.0, 1.2),
+            "still_agg": StatBaseline(0.4, 0.6, 0.0, 1.4),
+        }
+        zone.stat_cal = dict(good)
+        self.drive(h, 120.0)
+        assert zone.recording is None
+        (event,) = h.baseline_events()
+        assert event.success is False
+        cov = event.coverage
+        assert cov["still_agg"].status is Coverage.REJECTED
+        assert cov["still_agg"].fresh < 60  # ~48 at the measured cadence
+        assert "need 60" in cov["still_agg"].reason
+        # Partial coverage is reported honestly: the quiescent move channel
+        # would have been accepted, the gate paths never reported.
+        assert cov["move_agg"].status is Coverage.QUIESCENT
+        assert cov["move_gate"].status is Coverage.NO_DATA
+        # Atomic: nothing half-applied, nothing lost, nothing persisted.
+        assert zone.move_baseline.mu == pytest.approx(MU)
+        assert zone.still_baseline.mu == pytest.approx(MU)
+        assert zone.stat_cal == good
+        assert h.persist_count == 0
+
+    def test_default_window_at_measured_cadence_commits(self) -> None:
+        """The 300 s default yields ~120 fresh still observations: the
+        window commits, the quiescent move channel is reported as such,
+        and only the committed window persists."""
+        h = Harness()
+        zone = h.zone(DESK)
+        self.drive(h, None)  # the default baseline_duration
+        (event,) = h.baseline_events()
+        assert event.success is True
+        cov = event.coverage
+        assert cov["still_agg"].status is Coverage.CALIBRATED
+        assert cov["still_agg"].fresh >= 60
+        assert cov["move_agg"].status is Coverage.QUIESCENT  # reported as such
+        assert cov["move_gate"].status is Coverage.NO_DATA
+        assert zone.still_baseline.mu == pytest.approx(0.20, abs=0.02)
+        assert zone.still_baseline.sigma >= 0.05  # 3.1: UCB covers the truth
+        assert zone.move_baseline.mu == pytest.approx(0.03)
+        assert zone.move_baseline.sigma == pytest.approx(0.02)  # sigma_min
+        assert "still_agg" in zone.stat_cal  # empirical statistic (3.7)
+        assert "move_agg" not in zone.stat_cal  # quiescent: analytic fallback
+        assert h.persist_count == 1
 
 
 class TestRule34BackgroundAdaptation:

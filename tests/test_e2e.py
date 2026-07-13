@@ -27,7 +27,10 @@ from pytest_homeassistant_custom_component.common import (
 )
 
 from custom_components.presence_conductor.const import ALL_ROLES, DOMAIN, GATE_ROLES
-from custom_components.presence_conductor.controller import EVENT_PASS_BY
+from custom_components.presence_conductor.controller import (
+    EVENT_BASELINE_RECORDED,
+    EVENT_PASS_BY,
+)
 from tests.test_discovery import (
     KJOKKEN_PREFIX,
     KONTOR_PREFIX,
@@ -372,6 +375,7 @@ async def test_record_baseline_service_persists_into_options(hass: HomeAssistant
     coverage bar (production windows need 60+ rows).
     """
     entry, controller = await setup_e2e(hass, options={**OPTIONS, "tunables": {"stat_min_rows": 2}})
+    captured = async_capture_events(hass, EVENT_BASELINE_RECORDED)
 
     await hass.services.async_call(
         DOMAIN, "record_baseline", {"zone_id": "kjokken", "duration": 5}, blocking=True
@@ -390,6 +394,48 @@ async def test_record_baseline_service_persists_into_options(hass: HomeAssistant
     assert recorded["still_mu"] == pytest.approx(0.02)  # unchanged channel
     # The baselines-only write must not reload the entry.
     assert hass.data[DOMAIN][entry.entry_id] is controller
+    # 3.3 observability: the outcome is on the bus and the event entity.
+    assert len(captured) == 1
+    payload = captured[0].data
+    assert payload["zone_id"] == "kjokken"
+    assert payload["success"] is True
+    assert payload["coverage"]["move_agg"]["status"] == "calibrated"
+    assert payload["coverage"]["still_agg"]["status"] == "quiescent"
+    outcome = hass.states.get("event.presence_conductor_kjokken_calibration")
+    assert outcome.state != "unknown"
+    assert outcome.attributes["event_type"] == "recorded"
+    assert outcome.attributes["coverage"]["move_agg"]["status"] == "calibrated"
+
+
+async def test_record_baseline_rejection_is_visible_and_atomic(
+    hass: HomeAssistant, freezer
+) -> None:
+    """Rule 3.3: at production coverage (stat_min_rows=60) a short window
+    is rejected — nothing persists, and the failure is externally visible
+    on the bus and the zone's calibration event entity."""
+    entry, _controller = await setup_e2e(hass)
+    captured = async_capture_events(hass, EVENT_BASELINE_RECORDED)
+
+    await hass.services.async_call(
+        DOMAIN, "record_baseline", {"zone_id": "kjokken", "duration": 5}, blocking=True
+    )
+    for value in ("3.0", "4.0", "3.5", "5.0", "4.5"):
+        await set_states(hass, {KJOKKEN["move_energy"]: value})
+        await advance(hass, freezer, 1.0)
+    await advance(hass, freezer, 0.5)  # the 5 s window closes
+
+    # Nothing persisted: the setup floors survive verbatim (a commit would
+    # have moved move_mu to ~0.04, the driven median).
+    assert entry.options["baselines"]["kjokken"]["move_mu"] == pytest.approx(0.02)
+    assert len(captured) == 1
+    payload = captured[0].data
+    assert payload["success"] is False
+    move_cov = payload["coverage"]["move_agg"]
+    assert move_cov["status"] == "rejected"
+    assert "need 60" in move_cov["reason"]
+    outcome = hass.states.get("event.presence_conductor_kjokken_calibration")
+    assert outcome.state != "unknown"
+    assert outcome.attributes["event_type"] == "rejected"
 
 
 async def test_disable_freezes_outputs_and_swallows_events(hass: HomeAssistant, freezer) -> None:
@@ -410,8 +456,10 @@ async def test_disable_freezes_outputs_and_swallows_events(hass: HomeAssistant, 
     assert controller.state.zones["sofakrok"].occupied is True  # warm underneath
     assert hass.states.get(OCC_SOFAKROK).state == "off"  # frozen for consumers
     await leave_zone(hass, SOFAKROK)
-    for _ in range(15):
+    for i in range(15):
         await advance(hass, freezer, 1.0)
+        if i % 3 == 2:  # the empty stream keeps churning at the floor (3.8)
+            await set_states(hass, {SOFAKROK["still_energy"]: f"{2 + (i // 3) % 2}.0"})
     assert captured == []
     assert hass.states.get("event.presence_conductor_sofakrok_pass_by").state == "unknown"
 
@@ -430,8 +478,10 @@ async def test_disable_freezes_outputs_and_swallows_events(hass: HomeAssistant, 
     # And events flow again: a fresh walk-through emits its pass_by.
     await enter_zone(hass, freezer, SOFAKROK, "150.0")
     await leave_zone(hass, SOFAKROK)
-    for _ in range(15):
+    for i in range(15):
         await advance(hass, freezer, 1.0)
+        if i % 3 == 2:  # the empty stream keeps churning at the floor (3.8)
+            await set_states(hass, {SOFAKROK["still_energy"]: f"{4 + (i // 3) % 2}.0"})
     assert len(captured) == 1
     assert captured[0].data["zone_id"] == "sofakrok"
 
@@ -530,10 +580,10 @@ async def test_full_entity_inventory(hass: HomeAssistant) -> None:
     registry = er.async_get(hass)
     entries = er.async_entries_for_config_entry(registry, entry.entry_id)
     # Per zone: occupancy, motion, activity, confidence, dwell, pass-by
-    # event, record-baseline button. Per room: occupancy, motion, settled,
-    # activity, confidence, pass-by event. Home: anyone_home + confidence.
-    # Plus enabled + state.
-    assert len(entries) == 5 * 7 + 3 * 6 + 4
+    # event, calibration-outcome event, record-baseline button. Per room:
+    # occupancy, motion, settled, activity, confidence, pass-by event.
+    # Home: anyone_home + confidence. Plus enabled + state.
+    assert len(entries) == 5 * 8 + 3 * 6 + 4
 
     for zone_id in ("kjokken", "kontor_pult", "kontor_dor", "sofakrok", "spisebord"):
         for entity_id in (
@@ -659,8 +709,10 @@ async def test_two_sensors_cross_covering_two_rooms(hass: HomeAssistant, freezer
     assert hass.states.get(occ_spisebord).state == "off"  # gated out (2.1)
 
     await leave_zone(hass, CROSS_A)
-    for _ in range(15):  # decay + absence evidence release the zone
+    for i in range(15):  # decay + absence evidence release the zone
         await advance(hass, freezer, 1.0)
+        if i % 3 == 2:  # the empty stream keeps churning at the floor (3.8)
+            await set_states(hass, {CROSS_A["still_energy"]: f"{2 + (i // 3) % 2}.0"})
     assert hass.states.get(occ_sofakrok).state == "off"
 
     # Evidence at sensor B, 300 cm: B's *far* slice is the same room.
@@ -670,8 +722,10 @@ async def test_two_sensors_cross_covering_two_rooms(hass: HomeAssistant, freezer
 
     # And B's near slice is the other room.
     await leave_zone(hass, CROSS_B)
-    for _ in range(15):
+    for i in range(15):
         await advance(hass, freezer, 1.0)
+        if i % 3 == 2:  # the empty stream keeps churning at the floor (3.8)
+            await set_states(hass, {CROSS_B["still_energy"]: f"{2 + (i // 3) % 2}.0"})
     await enter_zone(hass, freezer, CROSS_B, "100.0")
     assert hass.states.get(occ_spisebord).state == "on"
     assert hass.states.get(occ_sofakrok).state == "off"

@@ -85,12 +85,15 @@ from .const import (
 )
 from .core.events import Event, SensorAvailability, SensorFrame, Tick
 from .core.model import ChannelStats, ConductorConfig, EngineState, InitialSnapshot
-from .core.plan import PassBy, Plan
+from .core.plan import BaselineRecorded, PassBy, Plan
 
 _LOGGER = logging.getLogger(__name__)
 
 #: HA bus event fired for every engine pass-by (rule 5.2).
 EVENT_PASS_BY = f"{DOMAIN}_pass_by"
+#: HA bus event fired for every RecordBaseline outcome (rule 3.3) —
+#: success or rejection, with the per-path coverage verdicts.
+EVENT_BASELINE_RECORDED = f"{DOMAIN}_baseline_recorded"
 
 UNAVAILABLE_STATES = (STATE_UNAVAILABLE, STATE_UNKNOWN)
 
@@ -119,7 +122,17 @@ _GATE_ROLE_INDEX: dict[str, tuple[str, int]] = {
 }
 
 #: Observation-clock role sets (rule 1.1). ``target`` flips when any kind
-#: of target appears or disappears: it observes both channels.
+#: of target appears or disappears: it observes both channels. Distance
+#: and flag updates count as observations of their channel's cached
+#: energy under a *verified firmware guarantee* (1.1): the LD2410 reports
+#: all fields in one atomic frame and the deployed per-entity filters are
+#: throttle-only, so a changed energy republishes within ~1 s — any radar
+#: entity publication therefore certifies an unchanged energy state as
+#: the current measurement. Firmware modes that suppress or delta-filter
+#: energy publications (Apollo ``reduce_db_reporting``, verified off on
+#: every deployed sensor) void this and are unsupported. The attack path
+#: (``move_energy_obs``, 4.2) stays energy-only regardless: the rare-tail
+#: chain accepts nothing but actual energy measurements.
 _MOVE_ROLES = frozenset(
     {ROLE_MOVE_ENERGY, ROLE_MOVING_DISTANCE, ROLE_MOVING_TARGET, ROLE_TARGET, *GATE_MOVE_ROLES}
 )
@@ -139,6 +152,29 @@ class EngineProtocol(Protocol):
     def submit(self, event: Event, now: float) -> Plan: ...
 
     def on_timer(self, key: str, now: float) -> Plan: ...
+
+
+def _baseline_payload(event: BaselineRecorded) -> dict[str, Any]:
+    """JSON-safe payload of one calibration outcome (rule 3.3)."""
+    return {
+        "zone_id": event.zone_id,
+        "success": event.success,
+        "frame_count": event.frame_count,
+        "move_mu": round(event.move_mu, 4),
+        "move_sigma": round(event.move_sigma, 4),
+        "still_mu": round(event.still_mu, 4),
+        "still_sigma": round(event.still_sigma, 4),
+        "coverage": {
+            key: {
+                "status": str(cov.status),
+                "rows": cov.rows,
+                "fresh": cov.fresh,
+                "distinct": cov.distinct,
+                **({"reason": cov.reason} if cov.reason else {}),
+            }
+            for key, cov in event.coverage.items()
+        },
+    }
 
 
 def _as_float(state: State | None) -> float | None:
@@ -181,7 +217,8 @@ class _SensorView:
     available: bool = False
     #: Observation clock (rule 1.1): counters advanced on every reported
     #: update of a channel's entities, including same-value forced
-    #: re-publications — that is a new measurement, not a duplicate.
+    #: re-publications — that is a new measurement, not a duplicate (see
+    #: the verified firmware guarantee on the role sets above).
     move_obs: int = 0
     still_obs: int = 0
     move_energy_obs: int = 0
@@ -349,6 +386,11 @@ class PresenceConductorController:
         zone of one room (rule 5.2 routed through §6 membership)."""
         return f"{DOMAIN}_{self.entry.entry_id}_room_pass_by_{room_id}"
 
+    def baseline_signal(self, zone_id: str) -> str:
+        """Dispatcher signal carrying :class:`BaselineRecorded` outcomes
+        for one zone (rule 3.3 observability)."""
+        return f"{DOMAIN}_{self.entry.entry_id}_baseline_{zone_id}"
+
     @callback
     def submit(self, event: Event) -> None:
         """Feed one event through the engine and apply the resulting plan.
@@ -466,8 +508,27 @@ class PresenceConductorController:
                 # entity the opt-in diagnostic.
                 room_id = self.config.zone(event.zone_id).room_id
                 async_dispatcher_send(self.hass, self.room_pass_by_signal(room_id), event)
-            # BaselineRecorded rides on persist_calibration above; entities
-            # (diagnostics) refresh through the publish below.
+            elif isinstance(event, BaselineRecorded):
+                # 3.3 observability: the calibration outcome — success or
+                # rejection — reaches the bus, the per-zone event entity
+                # and the log; persistence rode persist_calibration above
+                # (set only on a committed window).
+                payload = _baseline_payload(event)
+                self.hass.bus.async_fire(EVENT_BASELINE_RECORDED, payload)
+                async_dispatcher_send(self.hass, self.baseline_signal(event.zone_id), event)
+                if event.success:
+                    _LOGGER.info(
+                        "Baseline calibration for %s committed: %s",
+                        event.zone_id,
+                        payload["coverage"],
+                    )
+                else:
+                    _LOGGER.warning(
+                        "Baseline calibration for %s REJECTED — previous calibration kept, "
+                        "nothing persisted: %s",
+                        event.zone_id,
+                        payload["coverage"],
+                    )
         self._publish(plan.suppress_outputs)
 
     @callback

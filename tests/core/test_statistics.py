@@ -41,6 +41,8 @@ from .harness import (
     KONTOR,
     SOFA,
     SOFAKROK,
+    STAT_M0,
+    STAT_S0,
     Z_EMPTY,
     Harness,
     InitialSnapshot,
@@ -368,6 +370,95 @@ class TestRule38HeldAndCorrelatedNoise:
             h.send_frame(KONTOR, gate_move=m, gate_still=st)
             h.step_to(h.now + 1.0)
             assert not zone.occupied, f"rho={rho}: false occupancy at t={second}"
+
+    @pytest.mark.parametrize("seed", [50036, 50133])
+    def test_round5_seeds_gate_attack_stays_empty(self, seed: int) -> None:
+        """Round-5 review regressions: nine-gate AR(1) rho=0.9 noise,
+        calibrated over 120 s, then one empty hour. These seeds fit a
+        minimum gate sigma of 0.037 vs the true 0.05 (a per-fit 95% UCB is
+        not simultaneous over nine gates) and false-attacked at t=1435 /
+        t=981: two 1 s-spaced exceedances at rho=0.9 are one tail event,
+        not a squared one. The family-wise floor quantile (3.1) plus the
+        dependence-scaled confirmation gap (4.2) must hold them empty."""
+        config = _gate_zone_config(600.0)
+        h = Harness(config, InitialSnapshot())
+        owned = h.engine.owned_gates["z"]
+        rng = random.Random(seed)
+        rho = 0.9
+        innov = math.sqrt(1.0 - rho * rho)
+        state_m = dict.fromkeys(owned, 0.0)
+        state_s = dict.fromkeys(owned, 0.0)
+
+        def draw() -> tuple:
+            for st in (state_m, state_s):
+                for i in st:
+                    st[i] = rho * st[i] + innov * rng.gauss(0, 1)
+            quant = lambda v: float(max(0, min(100, round(20 + 5 * v))))  # noqa: E731
+            return (
+                gate_tuple({i: quant(state_m[i]) for i in owned}, fill=None),
+                gate_tuple({i: quant(state_s[i]) for i in owned}, fill=None),
+            )
+
+        zone = h.zone("z")
+        h.submit(RecordBaseline("z", duration=120.0))
+        for _ in range(121):
+            m, s = draw()
+            h.send_frame(KONTOR, gate_move=m, gate_still=s)
+            h.step_to(h.now + 1.0)
+        # 3.1 family-wise coverage: no gate floor underfits the true scale.
+        assert min(f.sigma for f in zone.gate_move_baselines.values()) >= 0.05
+        t = config.tunables
+        for second in range(3600):
+            m, s = draw()
+            h.send_frame(KONTOR, gate_move=m, gate_still=s)
+            # 4.2 reported separately: the attack chain must never confirm.
+            assert zone.attack_count < t.attack_confirm, f"attack at t={second}"
+            h.step_to(h.now + 1.0)
+            assert not zone.occupied, f"seed {seed}: false occupancy at t={second}"
+
+    def test_correlated_confirmations_wait_for_the_decorrelation_gap(self) -> None:
+        """Rule 4.2: a calibrated dependence estimate scales the
+        confirmation spacing — 1 s-spaced exceedances at tau=6 are one
+        tail event and must not confirm; spacing >= tau must (and the
+        window bound scales with it, else the spaced pair would restart
+        the chain instead)."""
+        config = make_config()
+        h = Harness(config, make_snapshot(config))
+        zone = h.zone(DESK)
+        zone.stat_cal["move_agg"] = StatBaseline(STAT_M0, STAT_S0, 0.0, tau=6.0)
+        h.send_frame(KONTOR, move_d=100.0, move_e=35.0, moving=True)
+        assert zone.attack_count == 1
+        h.send_frame(KONTOR, move_d=100.0, move_e=36.0, moving=True, at=h.now + 1.0)
+        assert zone.attack_count == 1  # inside the decorrelation gap: ignored
+        assert not zone.occupied
+        h.send_frame(KONTOR, move_d=100.0, move_e=37.0, moving=True, at=h.now + 5.0)
+        assert zone.attack_count == 2  # 6 s from the first counted one
+        assert zone.occupied  # 4.2: the confirmed attack floors the belief
+
+    def test_a_single_radar_burst_is_one_confirmation(self) -> None:
+        """Rule 4.2: per-gate entities update in a flurry from one radar
+        frame; the spacing floor collapses the burst to one confirmation —
+        nine fresh gate updates within milliseconds must not fire."""
+        config = _gate_zone_config(600.0)
+        floors = {i: GateBaselines(0.20, 0.05, 0.20, 0.05) for i in range(9)}
+        h = Harness(
+            config,
+            InitialSnapshot(baselines={"z": ZoneBaselines(0.20, 0.05, 0.20, 0.05, gates=floors)}),
+        )
+        zone = h.zone("z")
+        start = h.now
+        for i in range(9):  # one physical radar packet: a ms-spaced flurry
+            h.send_frame(
+                KONTOR,
+                gate_move=gate_tuple({2: 60.0 + i}, fill=None),
+                at=start + 0.001 * (i + 1),
+            )
+        assert zone.attack_count == 1
+        assert not zone.occupied
+        # The next radar interval is a distinct observation and confirms.
+        h.send_frame(KONTOR, gate_move=gate_tuple({2: 70.0}, fill=None), at=start + 0.4)
+        assert zone.attack_count == 2
+        assert zone.occupied
 
     def test_held_calibration_rows_do_not_overstate_confidence(self) -> None:
         """Rows without an observation-counter advance are excluded from

@@ -7,7 +7,7 @@ record_baseline:
         text:
     duration:
       required: false
-      example: 120
+      example: 300
       selector:
         number:
           min: 5

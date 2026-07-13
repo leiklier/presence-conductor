@@ -193,16 +193,21 @@ async def test_any_entity_change_produces_complete_frame(hass: HomeAssistant, mo
         still_obs=frame.still_obs,
         move_energy_obs=frame.move_energy_obs,
     )
+    first_move_obs = frame.move_obs
+    first_still_obs = frame.still_obs
     first_energy_obs = frame.move_energy_obs
 
     # The next change reuses the cached view: the energy sticks.
     hass.states.async_set(KONTOR_ENTITIES["moving_target"], "on")
     await hass.async_block_till_done()
     frame = fake.events_of(SensorFrame)[-1]
-    # 1.1 observation clock: the flag advanced move_obs, but no new energy
-    # measurement arrived.
+    # 1.1 observation clock: the flag observed the move channel (verified
+    # firmware guarantee — an unchanged energy state is the current
+    # measurement), but the attack counter accepts nothing except an
+    # actual energy publication (4.2).
+    assert frame.move_obs == first_move_obs + 1
+    assert frame.still_obs == first_still_obs
     assert frame.move_energy_obs == first_energy_obs
-    assert frame.move_obs > 0
     assert frame == SensorFrame(
         sensor_id=KONTOR,
         moving_distance_cm=0.0,
@@ -214,6 +219,15 @@ async def test_any_entity_change_produces_complete_frame(hass: HomeAssistant, mo
         still_obs=frame.still_obs,
         move_energy_obs=frame.move_energy_obs,
     )
+
+    # Distance churn observes its own channel only — and never the attack
+    # counter (rule 1.1 / 4.2).
+    hass.states.async_set(KONTOR_ENTITIES["still_distance"], "123.0")
+    await hass.async_block_till_done()
+    frame = fake.events_of(SensorFrame)[-1]
+    assert frame.move_obs == first_move_obs + 1
+    assert frame.still_obs == first_still_obs + 1
+    assert frame.move_energy_obs == first_energy_obs
 
 
 async def test_unknown_fields_are_none(hass: HomeAssistant, monkeypatch) -> None:

@@ -175,8 +175,11 @@ class Tunables:
     p_background: float = 0.05
     t_background: float = 600.0
     tau_background: float = 3600.0
-    #: Default RecordBaseline collection window (rule 3.3).
-    baseline_duration: float = 120.0
+    #: Default RecordBaseline collection window (rule 3.3), sized to the
+    #: measured ~2.5 s empty reporting cadence: 300 s yields ~120 fresh
+    #: observations per channel, comfortably above ``stat_min_rows``
+    #: (120 s yielded ~48 and rejected the still path).
+    baseline_duration: float = 300.0
     #: Activity FSM timing (rule 5.1).
     t_dwell: float = 45.0
     t_settle: float = 30.0
@@ -242,6 +245,41 @@ class BaselineRow:
     #: measurement and are excluded from the statistics.
     move_fresh: bool = True
     still_fresh: bool = True
+
+
+#: Calibration coverage statuses (rule 3.3).
+class Coverage(StrEnum):
+    """Per-path verdict of one RecordBaseline window (rule 3.3)."""
+
+    #: Enough distinct observations for a floor and fresh rows for a
+    #: statistic: the path's calibration is in the committed candidate.
+    CALIBRATED = "calibrated"
+    #: The channel's values span at most one quantum: the empty signal
+    #: never moves. Floor ``(median, sigma_min)``, analytic statistic.
+    QUIESCENT = "quiescent"
+    #: The channel never reported during the window: nothing to calibrate,
+    #: previous values kept. Never blocks the commit (a test rig or an
+    #: unconfigured path, not a coverage failure).
+    NO_DATA = "no_data"
+    #: Data present but too few fresh/distinct observations: blocks the
+    #: whole commit when the path is required.
+    REJECTED = "rejected"
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelCoverage:
+    """Coverage accounting for one evidence path (rule 3.3): the verdict
+    plus the counts that produced it."""
+
+    status: Coverage
+    #: Tick-aligned rows carrying data for this path (3.3).
+    rows: int
+    #: Rows on which the channel's observation counter advanced (1.1).
+    fresh: int
+    #: Distinct observations after collapsing consecutive duplicates (3.1).
+    distinct: int
+    #: Human-readable rejection reason; ``None`` unless REJECTED.
+    reason: str | None = None
 
 
 @dataclass(slots=True)

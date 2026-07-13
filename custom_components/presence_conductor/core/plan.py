@@ -16,7 +16,13 @@ The core's outputs are split in two:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from .model import ChannelCoverage
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +42,14 @@ class PassBy(EmittedEvent):
 
 @dataclass(frozen=True, slots=True)
 class BaselineRecorded(EmittedEvent):
-    """A RecordBaseline window completed and replaced the noise floor (3.3)."""
+    """A RecordBaseline window closed (rule 3.3): the transactional outcome.
+
+    ``success`` is the atomic commit verdict — False means a required path
+    failed coverage and *nothing* was applied or persisted. ``coverage``
+    carries the per-path accounting either way. The floor fields reflect
+    the zone's state after the window (committed candidate on success,
+    untouched previous calibration on rejection).
+    """
 
     zone_id: str
     move_mu: float
@@ -44,6 +57,8 @@ class BaselineRecorded(EmittedEvent):
     still_mu: float
     still_sigma: float
     frame_count: int
+    success: bool = True
+    coverage: Mapping[str, ChannelCoverage] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

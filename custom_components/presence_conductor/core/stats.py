@@ -82,6 +82,20 @@ def clipped_mean(m: int, neg_cap: float, pos_cap: float) -> float:
     return total + acc * h / 3.0
 
 
+@lru_cache(maxsize=GATE_COUNT + 1)
+def family_ucb_z(family: int) -> float:
+    """One-sided UCB quantile with family-wise 95% coverage (rule 3.1).
+
+    A zone's gate statistic is a max over ``family`` per-gate floors fitted
+    in the same window; at 95% per fit the probability that at least one
+    underestimates its scale approaches ``1 - 0.95^family``, and the max
+    statistic hands every future frame to whichever floor underfit. The
+    Bonferroni-adjusted quantile ``inv_cdf(1 - 0.05/family)`` keeps the
+    family-wise underestimation probability at ~5%.
+    """
+    return NormalDist().inv_cdf(1.0 - 0.05 / max(1, family))
+
+
 @lru_cache(maxsize=64)
 def attack_threshold(m: int, tail: float) -> float:
     """Raw-statistic threshold with ``P_H0(S >= threshold) = tail`` (4.2).

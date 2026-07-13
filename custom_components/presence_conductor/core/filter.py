@@ -118,18 +118,30 @@ def on_frame(engine: ConductorEngine, frame: SensorFrame, now: float, plan: Plan
         # chain untouched; elapsed time alone proves nothing.
         if sensor.move_energy_fresh:
             if zst.attack_candidate:
+                # 4.2: confirmation squares the tail only if the confirming
+                # observations are ~independent under H0. A calibrated
+                # dependence estimate (3.7) for the path in force scales
+                # the spacing: at gap tau the AR(1) residual correlation is
+                # rho^tau ~ e^-2, while 1 s-spaced exceedances at rho=0.9
+                # are essentially one tail event. tau = 1 (analytic
+                # fallback / measured independent) keeps the raw tunables.
+                path = "move_gate" if zst.move_from_gates else "move_agg"
+                tau = cal.tau if (cal := zst.stat_cal.get(path)) is not None else 1.0
+                gap_min = max(t.attack_gap_min, tau) if tau > 1.0 else t.attack_gap_min
+                gap_max = t.attack_gap_max * (gap_min / t.attack_gap_min)
                 last = zst.attack_last
-                if last is None or now - last > t.attack_gap_max:
+                if last is None or now - last > gap_max:
                     zst.attack_count = 1  # 4.2: chain (re)starts
                     zst.attack_last = now
                 # 1 µs absorbs float noise in the gap arithmetic: monotonic
                 # timestamps are large, and a 0.3 s difference can land
                 # just under 0.3 in binary floats.
-                elif now - last >= t.attack_gap_min - 1e-6:
+                elif now - last >= gap_min - 1e-6:
                     zst.attack_count += 1
                     zst.attack_last = now
                 # else: within one radar burst (per-gate entities update in
-                # a flurry from a single radar frame) - not distinct.
+                # a flurry from a single radar frame) or inside the
+                # decorrelation gap - not a distinct observation (4.2).
                 if zst.attack_count >= t.attack_confirm:
                     set_lambda(engine, zone, zst, max(zst.lam, engine.lam_attack), now, plan)
             else:
