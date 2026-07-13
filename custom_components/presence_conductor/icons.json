@@ -1,0 +1,98 @@
+{
+  "entity": {
+    "binary_sensor": {
+      "zone_occupancy": {
+        "default": "mdi:account-outline",
+        "state": {
+          "on": "mdi:account"
+        }
+      },
+      "zone_motion": {
+        "default": "mdi:motion-sensor-off",
+        "state": {
+          "on": "mdi:motion-sensor"
+        }
+      },
+      "room_occupancy": {
+        "default": "mdi:account-group-outline",
+        "state": {
+          "on": "mdi:account-group"
+        }
+      },
+      "room_settled": {
+        "default": "mdi:sofa-outline",
+        "state": {
+          "on": "mdi:sofa"
+        }
+      },
+      "anyone_home": {
+        "default": "mdi:home-outline",
+        "state": {
+          "on": "mdi:home-account"
+        }
+      }
+    },
+    "sensor": {
+      "zone_activity": {
+        "default": "mdi:radar",
+        "state": {
+          "empty": "mdi:circle-outline",
+          "passing": "mdi:walk",
+          "active": "mdi:run",
+          "settled": "mdi:sofa"
+        }
+      },
+      "room_activity": {
+        "default": "mdi:radar",
+        "state": {
+          "empty": "mdi:circle-outline",
+          "passing": "mdi:walk",
+          "active": "mdi:run",
+          "settled": "mdi:sofa"
+        }
+      },
+      "zone_probability": {
+        "default": "mdi:gauge"
+      },
+      "room_probability": {
+        "default": "mdi:gauge"
+      },
+      "home_probability": {
+        "default": "mdi:home-percent-outline"
+      },
+      "zone_dwell": {
+        "default": "mdi:timer-sand"
+      },
+      "state": {
+        "default": "mdi:radar",
+        "state": {
+          "enabled": "mdi:play-circle",
+          "disabled": "mdi:pause-circle-outline"
+        }
+      }
+    },
+    "switch": {
+      "enabled": {
+        "default": "mdi:play-circle",
+        "state": {
+          "off": "mdi:pause-circle"
+        }
+      }
+    },
+    "button": {
+      "record_baseline": {
+        "default": "mdi:chart-bell-curve"
+      }
+    },
+    "event": {
+      "pass_by": {
+        "default": "mdi:walk"
+      }
+    }
+  },
+  "services": {
+    "record_baseline": {
+      "service": "mdi:chart-bell-curve"
+    }
+  }
+}

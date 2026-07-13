@@ -251,5 +251,47 @@
     "abort": {
       "no_zones_configured": "There are no zones to edit. Add sensors first."
     }
+  },
+  "entity": {
+    "sensor": {
+      "zone_activity": {
+        "state": {
+          "empty": "Empty",
+          "passing": "Passing",
+          "active": "Active",
+          "settled": "Settled"
+        }
+      },
+      "room_activity": {
+        "state": {
+          "empty": "Empty",
+          "passing": "Passing",
+          "active": "Active",
+          "settled": "Settled"
+        }
+      },
+      "state": {
+        "state": {
+          "enabled": "Enabled",
+          "disabled": "Disabled"
+        }
+      }
+    }
+  },
+  "services": {
+    "record_baseline": {
+      "name": "Record baseline",
+      "description": "Records the empty-room noise floor of one zone. You assert the zone is empty for the window; robust statistics shrug off brief violations. The result replaces the zone's calibration and persists across restarts.",
+      "fields": {
+        "zone_id": {
+          "name": "Zone",
+          "description": "The zone's internal ID: the slug of its zone name (for example 'sofakrok')."
+        },
+        "duration": {
+          "name": "Duration",
+          "description": "Collection window in seconds. Defaults to the 'Baseline duration' tunable (120 s)."
+        }
+      }
+    }
   }
 }

@@ -251,5 +251,47 @@
     "abort": {
       "no_zones_configured": "Det finnes ingen soner å redigere. Legg til sensorer først."
     }
+  },
+  "entity": {
+    "sensor": {
+      "zone_activity": {
+        "state": {
+          "empty": "Tom",
+          "passing": "Passerer",
+          "active": "Aktiv",
+          "settled": "I ro"
+        }
+      },
+      "room_activity": {
+        "state": {
+          "empty": "Tom",
+          "passing": "Passerer",
+          "active": "Aktiv",
+          "settled": "I ro"
+        }
+      },
+      "state": {
+        "state": {
+          "enabled": "Aktivert",
+          "disabled": "Deaktivert"
+        }
+      }
+    }
+  },
+  "services": {
+    "record_baseline": {
+      "name": "Ta opp grunnlinje",
+      "description": "Tar opp støygulvet for én sone mens rommet er tomt. Du garanterer at sonen er tom i tidsvinduet; robust statistikk tåler korte brudd. Resultatet erstatter sonens kalibrering og overlever omstarter.",
+      "fields": {
+        "zone_id": {
+          "name": "Sone",
+          "description": "Sonens interne ID: sonenavnet som slug (for eksempel 'sofakrok')."
+        },
+        "duration": {
+          "name": "Varighet",
+          "description": "Innsamlingsvindu i sekunder. Standard er justeringsverdien 'Grunnlinjevarighet' (120 s)."
+        }
+      }
+    }
   }
 }
