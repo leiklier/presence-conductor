@@ -580,7 +580,10 @@ async def test_disabled_baseline_outcome_remains_visible(hass: HomeAssistant, fr
         await advance(hass, freezer, 1.0)
     await advance(hass, freezer, 0.5)
 
-    assert entry.options["baselines"]["kjokken"]["move_mu"] == pytest.approx(0.035)
+    # How many of the five frames land inside the window varies with the
+    # scheduler (see the range note in the persistence test above), so
+    # assert the covering range of the possible committed locations.
+    assert 0.03 <= entry.options["baselines"]["kjokken"]["move_mu"] <= 0.04
     assert len(captured) == 1
     assert captured[0].data["success"] is True
     outcome = hass.states.get("event.presence_conductor_kjokken_calibration")
