@@ -15,9 +15,10 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import DOMAIN
-from .controller import ConductorEntity, PresenceConductorController
+from .controller import PresenceConductorController
 from .core.events import RecordBaseline
 from .core.model import ZoneConfig
+from .entity import ConductorEntity
 
 
 async def async_setup_entry(

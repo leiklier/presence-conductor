@@ -18,8 +18,9 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DOMAIN
-from .controller import ConductorEntity, PresenceConductorController
+from .controller import PresenceConductorController
 from .core.events import SetEnabled
+from .entity import ConductorEntity
 
 
 async def async_setup_entry(

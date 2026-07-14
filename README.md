@@ -40,8 +40,9 @@ publishing signals automations can actually use:
 - **guided calibration** — record an empty-room baseline per zone instead of
   hand tuning 18 gate thresholds
 
-Status: design phase. The architecture decision is documented in
-[docs/DECISION.md](docs/DECISION.md); the normative engine contract lives in
+Status: deployed in production. The architecture decision is documented in
+[docs/DECISION.md](docs/DECISION.md). The documentation map starts at
+[docs/README.md](docs/README.md), and the normative engine contract lives in
 [docs/ENGINE_SPEC.md](docs/ENGINE_SPEC.md).
 
 Sibling project: [sonos-conductor](https://github.com/leiklier/sonos-conductor),

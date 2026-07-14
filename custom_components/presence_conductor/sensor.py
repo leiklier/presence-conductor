@@ -21,13 +21,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from .calibration import CalibrationStatus
 from .const import DOMAIN
-from .controller import (
-    CalibrationStatus,
-    ConductorEntity,
-    PresenceConductorController,
-)
+from .controller import PresenceConductorController
 from .core.model import Activity, Health, RoomState, ZoneConfig, ZoneState
+from .entity import ConductorEntity
 
 ACTIVITY_OPTIONS = [activity.value for activity in Activity]
 CALIBRATION_OPTIONS = [status.value for status in CalibrationStatus]

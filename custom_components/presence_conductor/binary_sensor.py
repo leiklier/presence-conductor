@@ -19,8 +19,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import DOMAIN
-from .controller import ConductorEntity, PresenceConductorController
+from .controller import PresenceConductorController
 from .core.model import Health, RoomState, ZoneConfig, ZoneState
+from .entity import ConductorEntity
 
 
 async def async_setup_entry(

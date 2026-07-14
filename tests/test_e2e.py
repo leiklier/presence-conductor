@@ -28,9 +28,9 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
+from custom_components.presence_conductor.calibration import CALIBRATION_ISSUE_ID_PREFIX
 from custom_components.presence_conductor.const import ALL_ROLES, DOMAIN, GATE_ROLES
 from custom_components.presence_conductor.controller import (
-    CALIBRATION_ISSUE_ID_PREFIX,
     EVENT_BASELINE_RECORDED,
     EVENT_PASS_BY,
 )
