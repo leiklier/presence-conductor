@@ -43,7 +43,7 @@ from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import (
     CALLBACK_TYPE,
     EventStateChangedData,
@@ -227,15 +227,26 @@ class _SensorView:
     frame_obs: int = 0
     move_energy_obs: int = 0
 
-    def update(self, role: str, state: State | None) -> None:
+    def update(self, role: str, state: State | None, *, measurement: bool = True) -> None:
         """Fold one entity state into the view."""
-        if state is not None and state.state not in UNAVAILABLE_STATES:
+        parseable = state is not None and (
+            state.state in {STATE_ON, STATE_OFF}
+            if role in {"target", "moving_target", "still_target"}
+            else _as_float(state) is not None
+        )
+        valid_measurement = (
+            measurement
+            and parseable
+            and state is not None
+            and state.state not in UNAVAILABLE_STATES
+        )
+        if valid_measurement:
             self.frame_obs += 1
-        if role in _MOVE_ROLES:
+        if valid_measurement and role in _MOVE_ROLES:
             self.move_obs += 1
-        if role in _STILL_ROLES:
+        if valid_measurement and role in _STILL_ROLES:
             self.still_obs += 1
-        if role in _MOVE_ENERGY_ROLES:
+        if valid_measurement and role in _MOVE_ENERGY_ROLES:
             self.move_energy_obs += 1
         if (gate := _GATE_ROLE_INDEX.get(role)) is not None:
             channel, index = gate
@@ -469,7 +480,17 @@ class PresenceConductorController:
             return
         sensor_id, role = mapped
         view = self._views[sensor_id]
-        view.update(role, event.data["new_state"])
+        old_state = event.data["old_state"]
+        new_state = event.data["new_state"]
+        # HA also emits state_changed for attribute-only updates. A same-
+        # state/same-attributes event is a force-republished measurement;
+        # changed attributes alone do not certify a new radar sample.
+        measurement = new_state is not None and (
+            old_state is None
+            or new_state.state != old_state.state
+            or new_state.attributes == old_state.attributes
+        )
+        view.update(role, new_state, measurement=measurement)
         available = _required_available(self.hass, self._roles_by_sensor[sensor_id])
         if available != view.available:
             view.available = available
@@ -589,28 +610,41 @@ class PresenceConductorController:
                 "move_sigma": zst.move_baseline.sigma,
                 "still_mu": zst.still_baseline.mu,
                 "still_sigma": zst.still_baseline.sigma,
+                "sensor_id": zone.sensor_id,
             }
             # Rule 3.6: optional per-gate floors (string keys: options are
-            # JSON). Zones without any stay schema-identical to v0.1.0. A
-            # gate calibrated on one channel only persists the defaults for
-            # the other, which is what the engine would score with anyway.
+            # JSON). Channel-presence flags prevent a rejected/absent
+            # counterpart from being synthesized during persistence.
+            move_gates = zst.gate_move_baselines if zst.gate_move_ready else {}
+            still_gates = zst.gate_still_baselines if zst.gate_still_ready else {}
             gates = {
                 str(index): {
-                    "move_mu": (gm := zst.gate_move_baselines.get(index, default)).mu,
+                    "move_mu": (gm := move_gates.get(index, default)).mu,
                     "move_sigma": gm.sigma,
-                    "still_mu": (gs := zst.gate_still_baselines.get(index, default)).mu,
+                    "still_mu": (gs := still_gates.get(index, default)).mu,
                     "still_sigma": gs.sigma,
+                    "has_move": index in move_gates,
+                    "has_still": index in still_gates,
                 }
-                for index in sorted(zst.gate_move_baselines.keys() | zst.gate_still_baselines)
+                for index in sorted(move_gates.keys() | still_gates)
             }
             if gates:
                 record["gates"] = gates
+                record["gate_indices"] = list(self.engine.owned_gates[zone.zone_id])
             # Rule 3.7: optional statistic calibration. Zones calibrated
             # before 3.7 (or not at all) persist without it and score
             # against the analytic fallback.
             stats = {
-                key: {"mu": cal.mu, "sigma": cal.sigma, "clip_mu": cal.clip_mu, "tau": cal.tau}
+                key: {
+                    "mu": cal.mu,
+                    "sigma": cal.sigma,
+                    "clip_mu": cal.clip_mu,
+                    "tau": cal.tau,
+                    "decorrelation_seconds": cal.decorrelation_seconds,
+                    "fingerprint": cal.fingerprint,
+                }
                 for key, cal in sorted(zst.stat_cal.items())
+                if cal.fingerprint
             }
             if stats:
                 record["stats"] = stats

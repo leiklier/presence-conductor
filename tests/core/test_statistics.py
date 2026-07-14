@@ -32,6 +32,7 @@ from custom_components.presence_conductor.core.model import (
 )
 from custom_components.presence_conductor.core.stats import (
     attack_threshold,
+    calibration_fingerprint,
     clipped_mean,
     onesided_max_stats,
 )
@@ -510,6 +511,15 @@ class TestRule38HeldAndCorrelatedNoise:
         h.send_frame(KONTOR, move_d=100.0, move_e=36.0, moving=True, at=h.now + 6.0)
         assert zone.occupied
 
+    def test_legacy_inverted_attack_window_remains_usable(self) -> None:
+        config = make_config(attack_gap_min=5.0, attack_gap_max=0.5)
+        h = Harness(config, make_snapshot(config))
+        h.send_frame(KONTOR, move_d=100.0, move_e=35.0, moving=True)
+        # The defensive legacy window is wide enough for real 1-2 s radar
+        # cadence, rather than requiring an implausibly exact timestamp.
+        h.send_frame(KONTOR, move_d=100.0, move_e=36.0, moving=True, at=6.5)
+        assert h.zone(DESK).occupied
+
     def test_held_calibration_rows_do_not_overstate_confidence(self) -> None:
         """Rows without an observation-counter advance are excluded from
         floors and statistics (3.1, 3.7): tick count is not sample count."""
@@ -564,6 +574,116 @@ class TestRule37Shrinkage:
         zone = h.zone("z")
         assert zone.gate_move_baselines == {}  # floors kept (3.3 coverage)
         assert zone.stat_cal == {}  # statistic kept too (3.7)
+
+
+class TestCalibrationCompatibility:
+    def test_current_sigma_floor_clamps_persisted_floors_and_invalidates_statistic(
+        self,
+    ) -> None:
+        old = _gate_zone_config(40.0, sigma_min=0.02)
+        owned = (0,)
+        persisted = ZoneBaselines(
+            0.05,
+            0.02,
+            0.05,
+            0.02,
+            gates={0: GateBaselines(0.05, 0.02, 0.05, 0.02)},
+            gate_indices=owned,
+            stats={
+                "move_gate": StatBaseline(
+                    0.4,
+                    0.6,
+                    fingerprint=calibration_fingerprint("move_gate", owned, old.tunables),
+                )
+            },
+        )
+        changed = _gate_zone_config(40.0, sigma_min=0.10)
+        h = Harness(changed, InitialSnapshot(baselines={"z": persisted}))
+        zone = h.zone("z")
+        assert zone.move_baseline.sigma == pytest.approx(0.10)
+        assert zone.still_baseline.sigma == pytest.approx(0.10)
+        assert zone.gate_move_baselines[0].sigma == pytest.approx(0.10)
+        assert zone.gate_still_baselines[0].sigma == pytest.approx(0.10)
+        assert "move_gate" not in zone.stat_cal
+
+    def test_current_energy_quantum_guards_legacy_floor(self) -> None:
+        old = make_config(energy_quantum=0.01)
+        fingerprint = calibration_fingerprint("move_agg", (), old.tunables)
+        persisted = ZoneBaselines(
+            0.05,
+            0.02,
+            0.05,
+            0.02,
+            stats={"move_agg": StatBaseline(0.4, 0.6, fingerprint=fingerprint)},
+        )
+        changed = make_config(energy_quantum=0.10)
+        h = Harness(changed, InitialSnapshot(baselines={DESK: persisted}))
+        floor = h.zone(DESK).move_baseline
+        assert floor.sigma == pytest.approx(evidence.MAD_TO_SIGMA * 0.10 / 2.0)
+        assert "move_agg" not in h.zone(DESK).stat_cal
+
+        # One reporting quantum cannot masquerade as a nominal 1e-4 tail.
+        h.send_frame(KONTOR, move_d=100.0, move_e=15.0, moving=True)
+        assert h.zone(DESK).attack_count == 0
+
+    def test_energy_quantum_guards_uncalibrated_default_floor(self) -> None:
+        config = make_config(default_mu=0.10, default_sigma=0.001, energy_quantum=0.10)
+        h = Harness(config, InitialSnapshot())
+        floor = h.zone(DESK).move_baseline
+        assert floor.sigma == pytest.approx(evidence.MAD_TO_SIGMA * 0.10 / 2.0)
+
+        h.send_frame(KONTOR, move_d=100.0, move_e=20.0, moving=True)
+        assert h.zone(DESK).attack_count == 0
+
+    def test_sensor_reassignment_invalidates_persisted_calibration(self) -> None:
+        config = make_config()
+        persisted = ZoneBaselines(
+            0.40,
+            0.03,
+            0.50,
+            0.04,
+            sensor_id="different_sensor",
+        )
+        h = Harness(config, InitialSnapshot(baselines={DESK: persisted}))
+        assert h.zone(DESK).move_baseline.mu == pytest.approx(config.tunables.default_mu)
+
+    def test_gate_ownership_change_invalidates_floors_and_statistic(self) -> None:
+        old = _gate_zone_config(40.0)
+        old_owned = (0,)
+        fingerprint = calibration_fingerprint("move_gate", old_owned, old.tunables)
+        persisted = ZoneBaselines(
+            0.05,
+            0.05,
+            0.05,
+            0.05,
+            gates={0: GateBaselines(0.05, 0.05, 0.05, 0.05)},
+            gate_indices=old_owned,
+            stats={"move_gate": StatBaseline(0.4, 0.6, fingerprint=fingerprint)},
+        )
+
+        expanded = _gate_zone_config(600.0)
+        h = Harness(expanded, InitialSnapshot(baselines={"z": persisted}))
+        zone = h.zone("z")
+        assert not zone.gate_move_ready
+        assert "move_gate" not in zone.stat_cal
+        h.send_frame(KONTOR, move_e=5.0, gate_move=gate_tuple({0: 60.0}, fill=5.0))
+        assert not zone.move_from_gates
+
+    def test_score_transform_change_invalidates_statistic(self) -> None:
+        old = make_config(z_cap=6.0)
+        # Aggregate fingerprints ignore the owned set; pass an empty tuple
+        # explicitly to make that contract visible.
+        fingerprint = calibration_fingerprint("move_agg", (), old.tunables)
+        persisted = ZoneBaselines(
+            0.05,
+            0.05,
+            0.05,
+            0.05,
+            stats={"move_agg": StatBaseline(0.4, 0.6, fingerprint=fingerprint)},
+        )
+        changed = make_config(z_cap=7.0)
+        h = Harness(changed, InitialSnapshot(baselines={DESK: persisted}))
+        assert "move_agg" not in h.zone(DESK).stat_cal
 
 
 class TestRule42AttackTail:

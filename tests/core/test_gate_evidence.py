@@ -102,12 +102,19 @@ class TestRule25GateEvidence:
         assert h.zone(DESK).occupied  # 4.2 (confirmed) on the gate move score
         assert h.zone(DOOR).occupied
 
-    def test_rule_2_5_uncalibrated_gates_use_the_tunables_defaults(self) -> None:
+    def test_rule_2_5_uncalibrated_gates_fall_back_to_aggregate(self) -> None:
         config = make_config(use_gate_evidence=True)
         h = Harness(config, make_snapshot(config))  # no persisted gate floors
-        h.send_frame(KONTOR, gate_move=gate_tuple({1: 15}, fill=10.0))
-        # default_mu 0.10, default_sigma 0.10: raw 10 -> 0, raw 15 -> S 0.5.
-        assert h.zone(DESK).z_move == pytest.approx(centered_of(0.5, m=3))
+        h.send_frame(
+            KONTOR,
+            move_d=100,
+            move_e=15.0,
+            moving=True,
+            gate_move=gate_tuple({1: 35}, fill=10.0),
+        )
+        desk = h.zone(DESK)
+        assert not desk.move_from_gates
+        assert desk.z_move == pytest.approx(centered_of_raw(15.0))
 
 
 class TestRule26GatePrecedence:

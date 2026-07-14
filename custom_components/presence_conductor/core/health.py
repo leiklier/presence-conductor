@@ -20,8 +20,16 @@ if TYPE_CHECKING:
     from .plan import Plan
 
 
-def on_frame(engine: ConductorEngine, sensor_id: str, now: float, plan: Plan) -> None:
-    """A frame arrived: recover health and re-arm the watchdog (1.3)."""
+def on_frame(
+    engine: ConductorEngine,
+    sensor_id: str,
+    now: float,
+    plan: Plan,
+    measurement_fresh: bool = True,
+) -> None:
+    """A measured frame arrived: recover health and re-arm the watchdog (1.3)."""
+    if not measurement_fresh:
+        return  # cached/metadata-only adapter emission is not sensor liveness
     sensor = engine.state.sensors[sensor_id]
     sensor.last_frame_at = now
     sensor.available = True  # a frame implies live entities
@@ -44,7 +52,13 @@ def on_availability(
         # 1.3: entities unavailable -> UNKNOWN immediately (whether or not
         # any zone is occupied — the sensor is plainly blind).
         for zone in engine.config.zones_for_sensor(event.sensor_id):
-            engine.state.zones[zone.zone_id].health = Health.UNKNOWN
+            zst = engine.state.zones[zone.zone_id]
+            zst.health = Health.UNKNOWN
+            # A confirmation chain may never bridge a period in which its
+            # measurement source was unavailable.
+            zst.attack_count = 0
+            zst.attack_last = None
+            zst.attack_path = None
         plan.cancel_timer(timers.sensor_stale(event.sensor_id))  # no frames expected
     # available=True alone carries no data: recovery waits for the next
     # frame (1.3), which restarts the watchdog.
@@ -53,11 +67,19 @@ def on_availability(
 def on_stale(engine: ConductorEngine, sensor_id: str, now: float, plan: Plan) -> None:
     """The staleness watchdog fired: no frame for ``stale_after`` (1.3)."""
     zones = engine.config.zones_for_sensor(sensor_id)
+    # No confirmation chain may bridge a period without measurements,
+    # including legitimate deduplicated silence while all zones are empty.
+    for zone in zones:
+        zst = engine.state.zones[zone.zone_id]
+        zst.attack_count = 0
+        zst.attack_last = None
+        zst.attack_path = None
     if any(engine.state.zones[z.zone_id].occupied for z in zones):
         # 1.3: silence *while occupied* means we are blind, not that the
         # occupant left — hold outputs, exclude from fusion (6.3).
         for zone in zones:
-            engine.state.zones[zone.zone_id].health = Health.UNKNOWN
+            zst = engine.state.zones[zone.zone_id]
+            zst.health = Health.UNKNOWN
     else:
         # An empty sensor may be legitimately silent (deduplicated,
         # unchanged readings). Re-arm so late-blooming occupancy without

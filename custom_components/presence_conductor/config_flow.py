@@ -708,7 +708,12 @@ class PresenceConductorOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         """Every Tunables field, seeded from storage (defaults otherwise)."""
         if user_input is not None:
-            return self._save({CONF_TUNABLES: _tunables_from_input(user_input)})
+            if user_input["attack_gap_max"] > user_input["attack_gap_min"]:
+                return self._save({CONF_TUNABLES: _tunables_from_input(user_input)})
+            schema = self.add_suggested_values_to_schema(_tunables_schema(), user_input)
+            return self.async_show_form(
+                step_id="tunables", data_schema=schema, errors={"base": "invalid_attack_gap"}
+            )
         stored = self.config_entry.options.get(CONF_TUNABLES, {})
         schema = self.add_suggested_values_to_schema(_tunables_schema(), stored)
         return self.async_show_form(step_id="tunables", data_schema=schema)

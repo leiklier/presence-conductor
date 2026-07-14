@@ -102,7 +102,7 @@ class Plan:
         self.suppress_outputs: bool = suppress_outputs
 
     def emit(self, event: EmittedEvent) -> None:
-        # 7.2: while disabled the engine emits no events.
+        # 7.2: while disabled ordinary presence-domain events are suppressed.
         if not self.suppress_outputs:
             self.events.append(event)
 

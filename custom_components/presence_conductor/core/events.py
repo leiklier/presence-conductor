@@ -54,13 +54,13 @@ class SensorFrame(Event):
     #: (inequality with the last seen value), never on value comparison.
     move_obs: int = 0
     still_obs: int = 0
+    #: Move-energy observations only (move_energy or gate-move entities);
+    #: consumed by the fast-attack confirmation (4.2).
+    move_energy_obs: int = 0
     #: Any supported sensor-entity observation. Calibration uses this
     #: sensor-wide epoch to distinguish a genuinely re-observed plateau
     #: from a cache repeated by ticks while the device is silent (3.3).
     frame_obs: int = 0
-    #: Move-energy observations only (move_energy or gate-move entities);
-    #: consumed by the fast-attack confirmation (4.2).
-    move_energy_obs: int = 0
 
 
 @dataclass(frozen=True, slots=True)

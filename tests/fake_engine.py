@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Iterable
 
+from custom_components.presence_conductor.core import gating
 from custom_components.presence_conductor.core.belief import logit, sigmoid
 from custom_components.presence_conductor.core.events import Event, SetEnabled
 from custom_components.presence_conductor.core.model import (
@@ -38,6 +39,12 @@ class FakeEngine:
         self.config = config
         self.snapshot = snapshot
         t = config.tunables
+        self.owned_gates = {
+            zone.zone_id: gating.owned_gates(
+                zone, config.sensor(zone.sensor_id).gate_size_cm, t.margin_cm
+            )
+            for zone in config.zones
+        }
         self.state = EngineState()
         self.state.lam_home = logit(t.p_prior)
         self.state.home_confidence = sigmoid(self.state.lam_home)

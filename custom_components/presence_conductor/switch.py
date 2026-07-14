@@ -1,9 +1,10 @@
 """The global enabled switch (spec rule 7.2).
 
 While off, the engine keeps ingesting frames and updating state (re-enable
-is warm) but publishes no transitions and emits no events. The switch itself
-is a control surface: it refreshes on the always-sent control signal, so it
-never freezes with the outputs it suppresses.
+is warm) but publishes no presence transitions or pass-by events. Explicit
+control-plane outcomes such as RecordBaseline still report. The switch
+itself is a control surface: it refreshes on the always-sent control signal,
+so it never freezes with the outputs it suppresses.
 """
 
 from __future__ import annotations

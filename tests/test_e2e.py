@@ -547,8 +547,14 @@ GATED_OPTIONS: dict[str, Any] = {
     "rooms": [{"room_id": "gates", "name": "Gates"}],
     "tunables": {"use_gate_evidence": True},  # 2.6: experimental opt-in
     "baselines": {
-        zone_id: {**TIGHT_BASELINE, "gates": {str(i): dict(TIGHT_BASELINE) for i in range(9)}}
-        for zone_id in ("gates_near", "gates_far")
+        zone_id: {
+            **TIGHT_BASELINE,
+            "gate_indices": indices,
+            "gates": {
+                str(i): {**TIGHT_BASELINE, "has_move": True, "has_still": True} for i in indices
+            },
+        }
+        for zone_id, indices in (("gates_near", [0, 1, 2]), ("gates_far", [2, 3, 4]))
     },
 }
 
@@ -599,7 +605,11 @@ async def test_gate_evidence_end_to_end(hass: HomeAssistant, freezer) -> None:
         {GATED_CLUSTER[role]: "unknown" for role in GATE_ROLES},
     )
     await advance(hass, freezer, 0.3)
-    await set_states(hass, {GATED_CLUSTER["move_energy"]: "81.0"})  # 4.2 confirm
+    # Unknown gate events are not measurements and cannot start an attack
+    # chain from cached aggregate energy. Two fresh aggregate readings do.
+    await set_states(hass, {GATED_CLUSTER["move_energy"]: "81.0"})
+    await advance(hass, freezer, 0.3)
+    await set_states(hass, {GATED_CLUSTER["move_energy"]: "82.0"})  # 4.2 confirm
     assert hass.states.get(occ_near).state == "on"  # fallback, per frame
     assert hass.states.get(occ_far).state != "unavailable"
 

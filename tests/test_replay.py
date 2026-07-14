@@ -151,9 +151,10 @@ def make_gated_replay_config() -> dict:
     sensor["gates_still"] = [f"sensor.kontor_g{i}_still_energy" for i in range(9)]
     sensor["gate_size_cm"] = 75.0
     config["tunables"] = {"use_gate_evidence": True}  # 2.6: experimental opt-in
+    config["baselines"]["kontor"]["gate_indices"] = list(range(5))
     config["baselines"]["kontor"]["gates"] = {
         str(i): {"move_mu": 0.05, "move_sigma": 0.05, "still_mu": 0.05, "still_sigma": 0.05}
-        for i in range(9)
+        for i in range(5)
     }
     return config
 

@@ -611,6 +611,21 @@ async def test_options_tunables_roundtrip(hass: HomeAssistant) -> None:
     assert entry.options["sensors"] == _base_options()["sensors"]
 
 
+async def test_options_reject_inverted_attack_gap(hass: HomeAssistant) -> None:
+    entry = await _add_entry(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "tunables"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {**TUNABLE_DEFAULTS, "attack_gap_min": 5.0, "attack_gap_max": 0.5},
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_attack_gap"}
+    assert entry.options["tunables"] == _base_options()["tunables"]
+
+
 async def test_options_remove_sensor(hass: HomeAssistant) -> None:
     """Deselecting a sensor drops it and its zones; baselines stay untouched."""
     entry = await _add_entry(hass)

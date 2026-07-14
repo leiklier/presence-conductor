@@ -56,6 +56,11 @@ _UCB_Z = 1.645
 STAT_KEYS = ("move_agg", "move_gate", "still_agg", "still_gate")
 
 
+def floor_sigma_min(sigma_min: float, quantum: float) -> float:
+    """Hard scale floor implied by configuration and device resolution."""
+    return max(sigma_min, MAD_TO_SIGMA * quantum / 2.0)
+
+
 def robust_stats(
     samples: list[float], sigma_min: float, quantum: float, ucb_z: float = _UCB_Z
 ) -> tuple[float, float]:
@@ -92,7 +97,7 @@ def robust_stats(
     n_eff = max(2.0, n * (1.0 - rho) / (1.0 + rho))
     k = min(n, math.ceil(n / 2 + ucb_z * n / (2.0 * math.sqrt(n_eff))))  # 1-based rank
     mad_ucb = deviations[k - 1]
-    return mu, max(sigma_min, MAD_TO_SIGMA * (mad_ucb + quantum / 2.0))
+    return mu, max(floor_sigma_min(sigma_min, quantum), MAD_TO_SIGMA * (mad_ucb + quantum / 2.0))
 
 
 def onesided_z(energy: float, floor: ChannelStats) -> float:
@@ -112,11 +117,10 @@ def gate_statistic(
     — no gate tuple, no owned gates (2.4), or every owned gate unknown —
     and the aggregate path applies instead (2.6).
     """
-    if values is None or not owned:
+    if values is None or not owned or not set(owned).issubset(floors):
         return None
-    default = ChannelStats(t.default_mu, t.default_sigma)  # 3.6: uncalibrated
     scores = [
-        onesided_z(value, floors.get(index, default))  # 3.6: the gate's own floor
+        onesided_z(value, floors[index])  # 3.6: the gate's own calibrated floor
         for index in owned
         if index < len(values) and (value := values[index]) is not None
     ]
@@ -221,8 +225,12 @@ def ingest_frame(engine: ConductorEngine, frame: SensorFrame, now: float | None)
         owned = engine.owned_gates[zone.zone_id]  # 2.4
         move_gated, still_gated = gates[zone.zone_id]
         if t.use_gate_evidence:
-            raw_move = gate_statistic(gate_move, owned, zst.gate_move_baselines, t)  # 2.5
-            raw_still = gate_statistic(gate_still, owned, zst.gate_still_baselines, t)  # 2.5
+            raw_move = gate_statistic(
+                gate_move, owned, zst.gate_move_baselines if zst.gate_move_ready else {}, t
+            )  # 2.5
+            raw_still = gate_statistic(
+                gate_still, owned, zst.gate_still_baselines if zst.gate_still_ready else {}, t
+            )  # 2.5
         else:
             # 2.6: gate evidence is experimental until real gate-path
             # timing is captured; calibration still records gate rows.
@@ -329,7 +337,15 @@ def _ema_update(stats_: ChannelStats, energy: float, alpha: float, t: Tunables) 
     """
     stats_.mu += alpha * (energy - stats_.mu)
     deviation = ABS_DEV_TO_SIGMA * (abs(energy - stats_.mu) + t.energy_quantum / 2.0)
-    stats_.sigma = max(t.sigma_min, stats_.sigma + alpha * (deviation - stats_.sigma))  # 3.1
+    # RecordBaseline installs a one-sided upper-confidence scale, whereas
+    # the online deviation is only a point estimate. Never let background
+    # adaptation erode that safety margin: rising sigma is conservative
+    # for both evidence and attack tails; an explicit new baseline may
+    # lower it transactionally when enough observations support doing so.
+    candidate = stats_.sigma + alpha * (deviation - stats_.sigma)
+    stats_.sigma = max(
+        stats_.sigma, floor_sigma_min(t.sigma_min, t.energy_quantum), candidate
+    )  # 3.1 / 3.4
 
 
 def _adapt_background(
@@ -381,7 +397,7 @@ def _adapt_background(
                 _ema_update(floor, energy, alpha, t)
 
 
-def collect_baseline_rows(engine: ConductorEngine) -> None:
+def collect_baseline_rows(engine: ConductorEngine, now: float) -> None:
     """One tick-aligned calibration row per recording zone (rule 3.3).
 
     Sampled from the sensor caches on the tick clock — never per entity
@@ -406,6 +422,7 @@ def collect_baseline_rows(engine: ConductorEngine) -> None:
                 still_e=sensor.last_still_e,
                 gate_move=sensor.last_gate_move,
                 gate_still=sensor.last_gate_still,
+                observed_at=now,
                 # 3.1/3.7: held/deduplicated rows repeat one measurement.
                 move_fresh=sensor.move_obs != recording.last_move_obs,
                 still_fresh=sensor.still_obs != recording.last_still_obs,
@@ -437,6 +454,7 @@ def on_record_baseline(
     # Start from the counters already adopted by the engine. The first tick
     # is fresh only if a post-command observation actually arrived.
     zst.recording = BaselineRecording(
+        started_at=now,
         last_move_obs=sensor.move_obs,
         last_still_obs=sensor.still_obs,
         last_frame_obs=sensor.frame_obs,
@@ -484,7 +502,14 @@ def _distinct(values: list[float]) -> list[float]:
     return out
 
 
-def _stat_of(raws: list[float], m: int, t: Tunables) -> StatBaseline | None:
+def _stat_of(
+    raws: list[float],
+    m: int,
+    t: Tunables,
+    *,
+    observed_at: list[float] | None = None,
+    fingerprint: str | None = None,
+) -> StatBaseline | None:
     """Empirical ``(m0, s0, c0)`` of the raw statistic over a window (3.7),
     shrunk toward safety.
 
@@ -510,7 +535,18 @@ def _stat_of(raws: list[float], m: int, t: Tunables) -> StatBaseline | None:
     rho = _lag1_autocorr(raws)
     rho_ucb = min(0.999, rho + 1.645 * math.sqrt(max(0.0, 1.0 - rho * rho) / len(raws)))
     tau = max(1.0, min(t.tau_int_max, (1.0 + rho_ucb) / (1.0 - rho_ucb)))
-    return StatBaseline(m0, s0, c0, tau)
+    intervals = [
+        later - earlier for earlier, later in pairwise(observed_at or []) if later > earlier
+    ]
+    cadence = median(intervals) if intervals else t.tick_interval
+    return StatBaseline(
+        m0,
+        s0,
+        c0,
+        tau,
+        decorrelation_seconds=max(t.tick_interval, tau * cadence),
+        fingerprint=fingerprint,
+    )
 
 
 def _assess_channel(
@@ -533,7 +569,7 @@ def _assess_channel(
         # 3.1/3.3: a quiescent result needs real sensor observations too.
         # Tick rows alone only repeat a cache and cannot certify a plateau.
         return (
-            ChannelStats(median(samples), t.sigma_min),
+            ChannelStats(median(samples), floor_sigma_min(t.sigma_min, t.energy_quantum)),
             ChannelCoverage(Coverage.QUIESCENT, *counts, observed=observed),
         )
     reason = (
@@ -592,8 +628,21 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
     ):
         if coverage[key].status is Coverage.CALIBRATED:
             floor = agg_floors.get(key, old_floor)
-            raws = [onesided_z(v, floor) for r in fresh_rows if (v := value_of(r)) is not None]
-            if (stat := _stat_of(raws, 1, t)) is not None:
+            pairs = [
+                (onesided_z(v, floor), r.observed_at)
+                for r in fresh_rows
+                if (v := value_of(r)) is not None
+            ]
+            raws = [raw for raw, _at in pairs]
+            if (
+                stat := _stat_of(
+                    raws,
+                    1,
+                    t,
+                    observed_at=[at for _raw, at in pairs],
+                    fingerprint=stats.calibration_fingerprint(key, owned, t),
+                )
+            ) is not None:
                 stat_candidates[key] = stat
 
     # ---- gate-path candidates (3.1 family-wise, 3.6, 3.7) --------------
@@ -631,15 +680,16 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
             and any(i < len(values) and values[i] is not None for i in owned)
         )
         complete = bool(owned) and set(floors) == set(owned)
-        raws = (
+        raw_pairs = (
             [
-                s
+                (s, row.observed_at)
                 for row in fresh_rows
                 if (s := gate_statistic(column_of(row), owned, floors, t)) is not None
             ]
             if complete
             else []
         )
+        raws = [raw for raw, _at in raw_pairs]
         counts = (data_rows, len(raws), len(_distinct(raws)))
         if data_rows == 0:
             coverage[key] = ChannelCoverage(Coverage.NO_DATA, 0, 0, 0, observed=observed)
@@ -659,7 +709,15 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
                 observed=observed,
                 reason=f"owned gates without certified floors: {missing}",
             )
-        elif (stat := _stat_of(raws, len(owned), t)) is not None:
+        elif (
+            stat := _stat_of(
+                raws,
+                len(owned),
+                t,
+                observed_at=[at for _raw, at in raw_pairs],
+                fingerprint=stats.calibration_fingerprint(key, owned, t),
+            )
+        ) is not None:
             stat_candidates[key] = stat
             gate_floors[key] = floors
             coverage[key] = ChannelCoverage(Coverage.CALIBRATED, *counts, observed=observed)
@@ -675,9 +733,38 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
                 Coverage.REJECTED, *counts, observed=observed, reason=reason
             )
 
+    # A calibration window must represent the whole stated interval, not
+    # front-load enough samples and then finish blind. Use the existing
+    # sensor-staleness contract as the maximum unobserved gap.
+    sensor = engine.state.sensors[zone.sensor_id]
+    observation_times = [row.observed_at for row in rows if row.frame_fresh]
+    timeline = [recording.started_at, *observation_times, now]
+    max_observation_gap = max(
+        (later - earlier for earlier, later in pairwise(timeline)),
+        default=now - recording.started_at,
+    )
+    quality_reason: str | None = None
+    if not sensor.available:
+        quality_reason = "sensor unavailable when calibration closed"
+    elif max_observation_gap > t.stale_after:
+        quality_reason = (
+            f"maximum sensor-observation gap {max_observation_gap:.1f}s exceeds "
+            f"stale_after {t.stale_after:.1f}s"
+        )
+    if quality_reason is not None:
+        for key, cov in tuple(coverage.items()):
+            if cov.status in {Coverage.CALIBRATED, Coverage.QUIESCENT}:
+                coverage[key] = ChannelCoverage(
+                    Coverage.REJECTED,
+                    cov.rows,
+                    cov.fresh,
+                    cov.distinct,
+                    reason=quality_reason,
+                    observed=cov.observed,
+                )
+
     # ---- atomic commit (3.3) -------------------------------------------
     required = ["move_agg", "still_agg"]
-    sensor = engine.state.sensors[zone.sensor_id]
     if t.use_gate_evidence and owned:
         # Gate entities that have ever been configured leave a tuple cache,
         # even if engineering mode currently reports every value unknown.
@@ -696,8 +783,10 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
         # leave every old floor and statistic untouched.
         if coverage["move_gate"].status in accepted:
             zst.gate_move_baselines = gate_floors["move_gate"]
+            zst.gate_move_ready = True
         if coverage["still_gate"].status in accepted:
             zst.gate_still_baselines = gate_floors["still_gate"]
+            zst.gate_still_ready = True
         new_stats = dict(zst.stat_cal)
         for key in ("move_agg", "still_agg", "move_gate", "still_gate"):
             if key in ("move_gate", "still_gate") and coverage[key].status not in accepted:

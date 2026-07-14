@@ -107,6 +107,8 @@ def on_frame(engine: ConductorEngine, frame: SensorFrame, now: float, plan: Plan
     sensor = engine.state.sensors[frame.sensor_id]
     for zone in engine.config.zones_for_sensor(frame.sensor_id):
         zst = engine.state.zones[zone.zone_id]
+        if zst.health is not Health.OK:
+            continue  # 1.3: cached/non-measurement frames cannot mutate frozen outputs
         if zst.recording is not None:
             continue  # 3.3: suspended while calibrating
         path = "move_gate" if zst.move_from_gates else "move_agg"
@@ -126,20 +128,29 @@ def on_frame(engine: ConductorEngine, frame: SensorFrame, now: float, plan: Plan
         # chain untouched; elapsed time alone proves nothing.
         if sensor.move_energy_fresh:
             if zst.attack_candidate:
-                # 4.2: confirmation squares the tail only if the confirming
-                # observations are ~independent under H0. A calibrated
+                # 4.2: confirmation greatly reduces the joint nominal tail
+                # only when observations are approximately independent. A calibrated
                 # dependence estimate (3.7) for the path in force scales
                 # the spacing: at gap tau the AR(1) residual correlation is
                 # rho^tau ~ e^-2, while 1 s-spaced exceedances at rho=0.9
                 # are essentially one tail event. tau = 1 (analytic
                 # fallback / measured independent) keeps the raw tunables.
                 tau = cal.tau if (cal := zst.stat_cal.get(path)) is not None else 1.0
+                configured_min = max(0.1, t.attack_gap_min)
+                decorrelation_seconds = (
+                    cal.decorrelation_seconds
+                    if cal is not None and cal.decorrelation_seconds is not None
+                    else (tau if cal is not None and tau > 1.0 else configured_min)
+                )
                 # The UI historically permitted attack_gap_min=0. Keep the
                 # core total and prevent same-burst confirmation regardless;
                 # preserve the configured window width when tau moves it.
-                configured_min = max(0.1, t.attack_gap_min)
-                gap_min = max(configured_min, tau) if tau > 1.0 else configured_min
-                gap_width = max(0.0, t.attack_gap_max - configured_min)
+                gap_min = max(configured_min, decorrelation_seconds)
+                # Fail safe for legacy/crafted max <= min configurations:
+                # restore the default 2.7 s window width. A 0.1 s sliver is
+                # effectively un-hittable at the measured 1-2 s cadence.
+                configured_width = t.attack_gap_max - configured_min
+                gap_width = configured_width if configured_width > 0.0 else 2.7
                 gap_max = gap_min + gap_width
                 last = zst.attack_last
                 if last is None or now - last > gap_max:

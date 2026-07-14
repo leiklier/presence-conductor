@@ -74,6 +74,7 @@
       "duplicate_zone_name": "En annen sone bruker allerede dette navnet. Sonenavn må være unike.",
       "invalid_room_name": "Romnavnet må inneholde minst én bokstav eller ett siffer.",
       "invalid_zone_range": "Den fjerne kanten må være større enn den nære kanten.",
+      "invalid_attack_gap": "Maksimum for angrepsintervall må være større enn minimum.",
       "multiple_fallback_zones": "Denne sensoren har allerede en reservesone. Maks én sone per sensor kan være reserve."
     },
     "abort": {
@@ -196,7 +197,7 @@
           "u_cap": "Tak for bevisrate",
           "tau_decay": "Henfallstidskonstant",
           "p_prior": "Tom-prior",
-          "attack_tail_ppm": "Halesannsynlighet for angrep (ppm)",
+          "attack_tail_ppm": "Nominell Gauss-hale for angrep (ppm)",
           "attack_confirm": "Bekreftelsesrammer for angrep",
           "attack_gap_min": "Min. bekreftelsesavstand",
           "attack_gap_max": "Maks. bekreftelsesavstand",
@@ -240,7 +241,7 @@
           "u_cap": "Øvre grense for bevisraten per sekund — én vill måling skal ikke kunne bygge mer enn en ekte ankomst.",
           "tau_decay": "Avslapningstidskonstant for troen mot tom-prioren (avreisehasarden — det finnes ingen fast tidsavbrudd for tilstedeværelse).",
           "p_prior": "Prior konfidens for tom tilstand som troen henfaller mot.",
-          "attack_tail_ppm": "Halesannsynlighet per observasjon, i deler per million, for at rå bevegelsesstatistikk blir angrepskandidat; terskelen er analytisk og korrigert for antall porter.",
+          "attack_tail_ppm": "Nominell Gauss-hale per observasjon, i deler per million, for at rå bevegelsesstatistikk blir angrepskandidat. Terskelen er analytisk og korrigert for antall porter, ikke en fordelingsfri falskalarmgaranti.",
           "attack_confirm": "Kvalifiserende rammer som kreves før hurtigangrepet utløses (1 gjenoppretter enkeltramme-angrep).",
           "attack_gap_min": "Minste avstand mellom kandidat- og bekreftelsesrammen.",
           "attack_gap_max": "Største avstand før angrepskandidaten utløper.",
@@ -272,6 +273,7 @@
       "duplicate_zone_name": "En annen sone bruker allerede dette navnet. Sonenavn må være unike.",
       "invalid_room_name": "Romnavnet må inneholde minst én bokstav eller ett siffer.",
       "invalid_zone_range": "Den fjerne kanten må være større enn den nære kanten.",
+      "invalid_attack_gap": "Maksimum for angrepsintervall må være større enn minimum.",
       "multiple_fallback_zones": "Denne sensoren har allerede en reservesone. Maks én sone per sensor kan være reserve."
     },
     "abort": {
