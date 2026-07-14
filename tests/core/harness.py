@@ -159,6 +159,7 @@ def frame(
     gate_still: tuple[float | None, ...] | None = None,
     move_obs: int = 0,
     still_obs: int = 0,
+    frame_obs: int = 0,
     move_energy_obs: int = 0,
 ) -> SensorFrame:
     """A coalesced frame (rule 1.1). Energies are raw 0-100."""
@@ -175,6 +176,7 @@ def frame(
         gate_still=gate_still,
         move_obs=move_obs,
         still_obs=still_obs,
+        frame_obs=frame_obs,
         move_energy_obs=move_energy_obs,
     )
 
@@ -246,19 +248,23 @@ class Harness:
         is a new measurement; pass ``fresh=False`` to re-present the cached
         values, as an unrelated entity change would. The per-channel
         overrides model partial updates (e.g. a still-only heartbeat)."""
-        counters = self.obs_counters.setdefault(sensor_id, [0, 0, 0])
+        counters = self.obs_counters.setdefault(sensor_id, [0, 0, 0, 0])
+        # Every explicit frame is a real adapter observation even when a
+        # channel-specific freshness override says its cached value held.
+        counters[2] += 1
         if fresh_move if fresh_move is not None else fresh:
             counters[0] += 1
         if fresh_still if fresh_still is not None else fresh:
             counters[1] += 1
         if fresh_move_energy if fresh_move_energy is not None else fresh:
-            counters[2] += 1
+            counters[3] += 1
         return self.submit(
             frame(
                 sensor_id,
                 move_obs=counters[0],
                 still_obs=counters[1],
-                move_energy_obs=counters[2],
+                frame_obs=counters[2],
+                move_energy_obs=counters[3],
                 **frame_kw,
             ),
             at=at,

@@ -38,15 +38,23 @@ import asyncio
 import logging
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from enum import StrEnum
 from typing import Any, Protocol
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.const import (
+    EVENT_STATE_REPORTED,
+    STATE_OFF,
+    STATE_ON,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
 from homeassistant.core import (
     CALLBACK_TYPE,
     EventStateChangedData,
+    EventStateReportedData,
     HomeAssistant,
     State,
     callback,
@@ -54,6 +62,7 @@ from homeassistant.core import (
 from homeassistant.core import (
     Event as HAEvent,
 )
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
 from homeassistant.helpers.entity import Entity
@@ -83,8 +92,15 @@ from .const import (
     ROLE_STILL_TARGET,
     ROLE_TARGET,
 )
+from .core import stats
 from .core.events import Event, SensorAvailability, SensorFrame, Tick
-from .core.model import ChannelStats, ConductorConfig, EngineState, InitialSnapshot
+from .core.model import (
+    ChannelStats,
+    ConductorConfig,
+    EngineState,
+    InitialSnapshot,
+    ZoneBaselines,
+)
 from .core.plan import BaselineRecorded, PassBy, Plan
 
 _LOGGER = logging.getLogger(__name__)
@@ -95,7 +111,52 @@ EVENT_PASS_BY = f"{DOMAIN}_pass_by"
 #: success or rejection, with the per-path coverage verdicts.
 EVENT_BASELINE_RECORDED = f"{DOMAIN}_baseline_recorded"
 
+CALIBRATION_ISSUE_ID_PREFIX = "calibration_required"
+
 UNAVAILABLE_STATES = (STATE_UNAVAILABLE, STATE_UNKNOWN)
+
+
+class CalibrationStatus(StrEnum):
+    """Bounded operator-facing calibration readiness states."""
+
+    READY = "ready"
+    UNCALIBRATED = "uncalibrated"
+    RECALIBRATION_REQUIRED = "recalibration_required"
+    CALIBRATING = "calibrating"
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationDiagnostic:
+    """Per-zone calibration provenance and active runtime paths."""
+
+    status: CalibrationStatus
+    reason_codes: tuple[str, ...]
+    reasons: tuple[str, ...]
+    floor_source: str
+    move_statistic: str
+    still_statistic: str
+    move_runtime: str
+    still_runtime: str
+
+    @property
+    def action(self) -> str | None:
+        if self.status in (CalibrationStatus.READY, CalibrationStatus.CALIBRATING):
+            return None
+        return "Keep the zone empty and record a new baseline (default 300 seconds)."
+
+    def attributes(self) -> dict[str, Any]:
+        """JSON-safe diagnostic entity attributes."""
+        return {
+            "reason_codes": list(self.reason_codes),
+            "reasons": list(self.reasons),
+            "action": self.action,
+            "floor_source": self.floor_source,
+            "move_statistic": self.move_statistic,
+            "still_statistic": self.still_statistic,
+            "move_runtime": self.move_runtime,
+            "still_runtime": self.still_runtime,
+        }
+
 
 #: Frame roles the controller subscribes to. ``detection_distance`` is part
 #: of the LD2410 cluster but not consumed by the estimator (const.py), so
@@ -146,6 +207,7 @@ class EngineProtocol(Protocol):
     """The engine surface the controller drives (real or test double)."""
 
     state: EngineState
+    owned_gates: dict[str, tuple[int, ...]]
 
     def start(self, now: float) -> Plan: ...
 
@@ -170,6 +232,7 @@ def _baseline_payload(event: BaselineRecorded) -> dict[str, Any]:
                 "rows": cov.rows,
                 "fresh": cov.fresh,
                 "distinct": cov.distinct,
+                "observed": cov.observed,
                 **({"reason": cov.reason} if cov.reason else {}),
             }
             for key, cov in event.coverage.items()
@@ -221,15 +284,31 @@ class _SensorView:
     #: the verified firmware guarantee on the role sets above).
     move_obs: int = 0
     still_obs: int = 0
+    #: Sensor-wide observation epoch used only to certify calibration
+    #: plateaus. Every subscribed entity event advances it; ticks do not.
+    frame_obs: int = 0
     move_energy_obs: int = 0
 
-    def update(self, role: str, state: State | None) -> None:
+    def update(self, role: str, state: State | None, *, measurement: bool = True) -> None:
         """Fold one entity state into the view."""
-        if role in _MOVE_ROLES:
+        parseable = state is not None and (
+            state.state in {STATE_ON, STATE_OFF}
+            if role in {"target", "moving_target", "still_target"}
+            else _as_float(state) is not None
+        )
+        valid_measurement = (
+            measurement
+            and parseable
+            and state is not None
+            and state.state not in UNAVAILABLE_STATES
+        )
+        if valid_measurement:
+            self.frame_obs += 1
+        if valid_measurement and role in _MOVE_ROLES:
             self.move_obs += 1
-        if role in _STILL_ROLES:
+        if valid_measurement and role in _STILL_ROLES:
             self.still_obs += 1
-        if role in _MOVE_ENERGY_ROLES:
+        if valid_measurement and role in _MOVE_ENERGY_ROLES:
             self.move_energy_obs += 1
         if (gate := _GATE_ROLE_INDEX.get(role)) is not None:
             channel, index = gate
@@ -274,6 +353,7 @@ class _SensorView:
             gate_still=None if self.gate_still is None else tuple(self.gate_still),
             move_obs=self.move_obs,
             still_obs=self.still_obs,
+            frame_obs=self.frame_obs,
             move_energy_obs=self.move_energy_obs,
         )
 
@@ -367,6 +447,12 @@ class PresenceConductorController:
             sensor_id: _build_view(hass, roles)
             for sensor_id, roles in self._roles_by_sensor.items()
         }
+        # Preserve startup provenance before the core safely discards any
+        # incompatible pieces. Baseline-only writes update this map without
+        # reloading the integration.
+        self._known_baselines: dict[str, ZoneBaselines] = dict(snapshot.baselines)
+        self._calibration_diagnostics: dict[str, CalibrationDiagnostic] = {}
+        self._refresh_calibration_diagnostics()
 
     # -- public API for entities ---------------------------------------------
 
@@ -376,6 +462,30 @@ class PresenceConductorController:
 
     def room_name(self, room_id: str) -> str:
         return self._room_names.get(room_id, room_id)
+
+    def calibration_diagnostic(self, zone_id: str) -> CalibrationDiagnostic:
+        """Current calibration readiness for one zone."""
+        diagnostic = self._calibration_diagnostics[zone_id]
+        zst = self.engine.state.zones[zone_id]
+        move_runtime = "gate" if zst.move_from_gates else "aggregate"
+        still_runtime = "gate" if zst.still_from_gates else "aggregate"
+        status = CalibrationStatus.CALIBRATING if zst.recording is not None else diagnostic.status
+        return replace(
+            diagnostic,
+            status=status,
+            move_runtime=move_runtime,
+            still_runtime=still_runtime,
+            move_statistic=(
+                "empirical"
+                if f"move_{'gate' if zst.move_from_gates else 'agg'}" in zst.stat_cal
+                else "analytic"
+            ),
+            still_statistic=(
+                "empirical"
+                if f"still_{'gate' if zst.still_from_gates else 'agg'}" in zst.stat_cal
+                else "analytic"
+            ),
+        )
 
     def pass_by_signal(self, zone_id: str) -> str:
         """Dispatcher signal carrying :class:`PassBy` events for one zone."""
@@ -390,6 +500,164 @@ class PresenceConductorController:
         """Dispatcher signal carrying :class:`BaselineRecorded` outcomes
         for one zone (rule 3.3 observability)."""
         return f"{DOMAIN}_{self.entry.entry_id}_baseline_{zone_id}"
+
+    def _diagnose_zone_calibration(self, zone_id: str) -> CalibrationDiagnostic:
+        """Derive provenance before/after the core's safe fallbacks."""
+        zone = self.config.zone(zone_id)
+        sensor = self.config.sensor(zone.sensor_id)
+        zst = self.engine.state.zones[zone_id]
+        persisted = self._known_baselines.get(zone_id)
+        owned = self.engine.owned_gates[zone_id]
+        roles = self._roles_by_sensor.get(zone.sensor_id, {})
+        reasons: list[str] = []
+        reason_codes: list[str] = []
+
+        def add(code: str, reason: str) -> None:
+            if code not in reason_codes:
+                reason_codes.append(code)
+                reasons.append(reason)
+
+        floor_source = "default"
+        context_valid = False
+        if persisted is None:
+            add("no_recorded_baseline", "No recorded baseline is available.")
+        elif persisted.sensor_id not in (None, zone.sensor_id):
+            add(
+                "sensor_changed",
+                f"Sensor changed from {persisted.sensor_id} to {zone.sensor_id}.",
+            )
+        elif (
+            persisted.floor_fingerprint is not None
+            and persisted.floor_fingerprint
+            != stats.floor_calibration_fingerprint(self.config.tunables)
+        ):
+            add(
+                "floor_settings_changed",
+                "The empty-channel floor-fit settings changed after this baseline was recorded.",
+            )
+        else:
+            context_valid = True
+            floor_source = "recorded"
+            if persisted.sensor_id is None or persisted.floor_fingerprint is None:
+                add(
+                    "legacy_context",
+                    "The recorded baseline predates calibration compatibility metadata.",
+                )
+
+        move_gates_configured = any(role in roles for role in GATE_MOVE_ROLES)
+        still_gates_configured = any(role in roles for role in GATE_STILL_ROLES)
+        gate_requested = self.config.tunables.use_gate_evidence and bool(owned)
+        if gate_requested:
+            if not move_gates_configured and not still_gates_configured:
+                add(
+                    "gate_entities_missing",
+                    "Gate evidence is enabled, but no gate energy entities are configured.",
+                )
+            if context_valid and persisted is not None:
+                if (
+                    persisted.gate_size_cm is not None
+                    and persisted.gate_size_cm != sensor.gate_size_cm
+                ):
+                    add(
+                        "gate_resolution_changed",
+                        "Gate resolution changed from "
+                        f"{persisted.gate_size_cm:g} cm to {sensor.gate_size_cm:g} cm.",
+                    )
+                if persisted.gate_indices is not None and persisted.gate_indices != owned:
+                    add(
+                        "gate_family_changed",
+                        "Owned gates changed from "
+                        f"{list(persisted.gate_indices)} to {list(owned)}.",
+                    )
+            if move_gates_configured and not zst.gate_move_ready:
+                add(
+                    "gate_move_calibration_missing",
+                    "Move-gate calibration is missing, incomplete, or incompatible.",
+                )
+            if still_gates_configured and not zst.gate_still_ready:
+                add(
+                    "gate_still_calibration_missing",
+                    "Still-gate calibration is missing, incomplete, or incompatible.",
+                )
+
+        active_stat_paths = ["move_agg", "still_agg"]
+        if gate_requested and move_gates_configured:
+            active_stat_paths.append("move_gate")
+        if gate_requested and still_gates_configured:
+            active_stat_paths.append("still_gate")
+        if context_valid and persisted is not None:
+            for path in active_stat_paths:
+                cal = persisted.stats.get(path)
+                if cal is None:
+                    continue  # valid quiescent calibration uses analytic statistics
+                expected = stats.calibration_fingerprint(path, owned, self.config.tunables)
+                if cal.fingerprint != expected:
+                    add(
+                        "statistic_context_changed",
+                        f"The saved {path} statistic is incompatible with current settings.",
+                    )
+
+        move_runtime = "gate" if zst.move_from_gates else "aggregate"
+        still_runtime = "gate" if zst.still_from_gates else "aggregate"
+        move_stat_path = "move_gate" if move_runtime == "gate" else "move_agg"
+        still_stat_path = "still_gate" if still_runtime == "gate" else "still_agg"
+        status = (
+            CalibrationStatus.UNCALIBRATED
+            if persisted is None
+            else (CalibrationStatus.RECALIBRATION_REQUIRED if reasons else CalibrationStatus.READY)
+        )
+        return CalibrationDiagnostic(
+            status=status,
+            reason_codes=tuple(reason_codes),
+            reasons=tuple(reasons),
+            floor_source=floor_source,
+            move_statistic="empirical" if move_stat_path in zst.stat_cal else "analytic",
+            still_statistic="empirical" if still_stat_path in zst.stat_cal else "analytic",
+            move_runtime=move_runtime,
+            still_runtime=still_runtime,
+        )
+
+    @callback
+    def _refresh_calibration_diagnostics(self, zone_ids: set[str] | None = None) -> None:
+        """Re-evaluate bounded per-zone readiness from known provenance."""
+        selected = zone_ids or {zone.zone_id for zone in self.config.zones}
+        for zone_id in selected:
+            if self.config.zone_or_none(zone_id) is not None:
+                self._calibration_diagnostics[zone_id] = self._diagnose_zone_calibration(zone_id)
+
+    @property
+    def _calibration_issue_id(self) -> str:
+        return f"{CALIBRATION_ISSUE_ID_PREFIX}_{self.entry.entry_id}"
+
+    @callback
+    def _sync_calibration_issue(self) -> None:
+        """Maintain one nonpersistent Repairs warning for this config entry."""
+        failing = [
+            (zone, self._calibration_diagnostics[zone.zone_id])
+            for zone in self.config.zones
+            if self._calibration_diagnostics[zone.zone_id].status is not CalibrationStatus.READY
+        ]
+        if not failing:
+            ir.async_delete_issue(self.hass, DOMAIN, self._calibration_issue_id)
+            return
+        details = " | ".join(
+            f"{zone.name}: {'; '.join(diagnostic.reasons)}" for zone, diagnostic in failing
+        )
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            self._calibration_issue_id,
+            is_fixable=False,
+            is_persistent=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="calibration_required",
+            translation_placeholders={"details": details},
+        )
+
+    @callback
+    def clear_calibration_issue(self) -> None:
+        """Remove this entry's warning after a successful entry unload."""
+        ir.async_delete_issue(self.hass, DOMAIN, self._calibration_issue_id)
 
     @callback
     def submit(self, event: Event) -> None:
@@ -426,6 +694,7 @@ class PresenceConductorController:
             timedelta(seconds=self.config.tunables.tick_interval),  # 1.2
         )
         self._apply_plan(self.engine.start(time.monotonic()))
+        self._sync_calibration_issue()
 
     async def async_stop(self) -> None:
         """Cancel subscriptions, the tick clock and all engine timers."""
@@ -453,16 +722,57 @@ class PresenceConductorController:
                     self.hass, sorted(self._sensor_role_by_entity), self._on_entity_event
                 )
             )
+            # Exact same-state/same-attribute writes are EVENT_STATE_REPORTED,
+            # not EVENT_STATE_CHANGED. HA requires an event filter for this
+            # high-volume event type; using the tracked-entity map keeps the
+            # listener O(1) and independent of ESPHome force_update settings.
+            self._unsubs.append(
+                self.hass.bus.async_listen(
+                    EVENT_STATE_REPORTED,
+                    self._on_entity_reported,
+                    event_filter=self._is_tracked_state_report,
+                )
+            )
+
+    @callback
+    def _is_tracked_state_report(self, data: EventStateReportedData) -> bool:
+        """Filter the high-volume state_reported bus at dispatch time."""
+        return data["entity_id"] in self._sensor_role_by_entity
 
     @callback
     def _on_entity_event(self, event: HAEvent[EventStateChangedData]) -> None:
-        """Rule 1.1: any underlying entity change produces a complete frame."""
-        mapped = self._sensor_role_by_entity.get(event.data["entity_id"])
+        """Rule 1.1: fold a changed entity and classify sample freshness."""
+        old_state = event.data["old_state"]
+        new_state = event.data["new_state"]
+        # A same-value write with changed attributes is ambiguous metadata,
+        # not proof that the radar value was sampled again. Exact repeated
+        # reports arrive on state_reported; force_update arrives here with
+        # equal attributes. Both are explicit measurements.
+        measurement = new_state is not None and (
+            old_state is None
+            or new_state.state != old_state.state
+            or new_state.attributes == old_state.attributes
+        )
+        self._on_entity_measurement(event.data["entity_id"], new_state, measurement=measurement)
+
+    @callback
+    def _on_entity_reported(self, event: HAEvent[EventStateReportedData]) -> None:
+        """Rule 1.1: an unchanged state write is still a measurement."""
+        self._on_entity_measurement(
+            event.data["entity_id"], event.data["new_state"], measurement=True
+        )
+
+    @callback
+    def _on_entity_measurement(
+        self, entity_id: str, new_state: State | None, *, measurement: bool
+    ) -> None:
+        """Fold one tracked HA report and submit the sensor's complete view."""
+        mapped = self._sensor_role_by_entity.get(entity_id)
         if mapped is None:
             return
         sensor_id, role = mapped
         view = self._views[sensor_id]
-        view.update(role, event.data["new_state"])
+        view.update(role, new_state, measurement=measurement)
         available = _required_available(self.hass, self._roles_by_sensor[sensor_id])
         if available != view.available:
             view.available = available
@@ -489,7 +799,12 @@ class PresenceConductorController:
         if plan.persist_calibration:
             # Honored even while disabled: calibration is operator-requested
             # data, not a published transition (rule 7.2).
-            self._persist_baselines()
+            changed_zones = plan.persist_calibration_zones or {
+                zone.zone_id for zone in self.config.zones
+            }
+            self._persist_baselines(changed_zones)
+            self._refresh_calibration_diagnostics(changed_zones)
+            self._sync_calibration_issue()
         for event in plan.events:
             # The plan is empty while suppressed (Plan.emit drops events,
             # rule 7.2); everything here is meant to be published.
@@ -563,7 +878,7 @@ class PresenceConductorController:
     # -- baseline persistence ------------------------------------------------------
 
     @callback
-    def _persist_baselines(self) -> None:
+    def _persist_baselines(self, zone_ids: set[str]) -> None:
         """Write the engine's zone baselines into the config entry (rule 3.3).
 
         Merged over the stored map so baseline keys of removed zones survive
@@ -574,6 +889,8 @@ class PresenceConductorController:
         default = ChannelStats(self.config.tunables.default_mu, self.config.tunables.default_sigma)
         current: dict[str, Any] = {}
         for zone in self.config.zones:
+            if zone.zone_id not in zone_ids:
+                continue
             zst = self.engine.state.zones.get(zone.zone_id)
             if zst is None:
                 continue
@@ -582,40 +899,58 @@ class PresenceConductorController:
                 "move_sigma": zst.move_baseline.sigma,
                 "still_mu": zst.still_baseline.mu,
                 "still_sigma": zst.still_baseline.sigma,
+                "sensor_id": zone.sensor_id,
+                "floor_fingerprint": stats.floor_calibration_fingerprint(self.config.tunables),
+                "gate_size_cm": self.config.sensor(zone.sensor_id).gate_size_cm,
             }
             # Rule 3.6: optional per-gate floors (string keys: options are
-            # JSON). Zones without any stay schema-identical to v0.1.0. A
-            # gate calibrated on one channel only persists the defaults for
-            # the other, which is what the engine would score with anyway.
+            # JSON). Channel-presence flags prevent a rejected/absent
+            # counterpart from being synthesized during persistence.
+            move_gates = zst.gate_move_baselines if zst.gate_move_ready else {}
+            still_gates = zst.gate_still_baselines if zst.gate_still_ready else {}
             gates = {
                 str(index): {
-                    "move_mu": (gm := zst.gate_move_baselines.get(index, default)).mu,
+                    "move_mu": (gm := move_gates.get(index, default)).mu,
                     "move_sigma": gm.sigma,
-                    "still_mu": (gs := zst.gate_still_baselines.get(index, default)).mu,
+                    "still_mu": (gs := still_gates.get(index, default)).mu,
                     "still_sigma": gs.sigma,
+                    "has_move": index in move_gates,
+                    "has_still": index in still_gates,
                 }
-                for index in sorted(zst.gate_move_baselines.keys() | zst.gate_still_baselines)
+                for index in sorted(move_gates.keys() | still_gates)
             }
             if gates:
                 record["gates"] = gates
+                record["gate_indices"] = list(self.engine.owned_gates[zone.zone_id])
             # Rule 3.7: optional statistic calibration. Zones calibrated
             # before 3.7 (or not at all) persist without it and score
             # against the analytic fallback.
-            stats = {
-                key: {"mu": cal.mu, "sigma": cal.sigma, "clip_mu": cal.clip_mu, "tau": cal.tau}
+            statistic_records = {
+                key: {
+                    "mu": cal.mu,
+                    "sigma": cal.sigma,
+                    "clip_mu": cal.clip_mu,
+                    "tau": cal.tau,
+                    "decorrelation_seconds": cal.decorrelation_seconds,
+                    "fingerprint": cal.fingerprint,
+                }
                 for key, cal in sorted(zst.stat_cal.items())
+                if cal.fingerprint
             }
-            if stats:
-                record["stats"] = stats
+            if statistic_records:
+                record["stats"] = statistic_records
             current[zone.zone_id] = record
         merged = {**stored, **current}
-        if merged == stored:
-            return
-        # The options listener in __init__.py ignores baselines-only diffs,
-        # so this write never causes a reload loop.
-        self.hass.config_entries.async_update_entry(
-            self.entry, options={**self.entry.options, CONF_BASELINES: merged}
-        )
+        if merged != stored:
+            # The options listener in __init__.py ignores baselines-only
+            # diffs, so this write never causes a reload loop.
+            self.hass.config_entries.async_update_entry(
+                self.entry, options={**self.entry.options, CONF_BASELINES: merged}
+            )
+        parsed = baselines_from_options({CONF_BASELINES: merged})
+        for zone_id in zone_ids:
+            if (baseline := parsed.get(zone_id)) is not None:
+                self._known_baselines[zone_id] = baseline
 
 
 # ---------------------------------------------------------------------------

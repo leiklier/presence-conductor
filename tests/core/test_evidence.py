@@ -6,7 +6,11 @@ import pytest
 
 from custom_components.presence_conductor.core import timers
 from custom_components.presence_conductor.core.belief import advance
-from custom_components.presence_conductor.core.events import RecordBaseline
+from custom_components.presence_conductor.core.events import (
+    RecordBaseline,
+    SensorAvailability,
+    SetEnabled,
+)
 from custom_components.presence_conductor.core.evidence import robust_stats
 from custom_components.presence_conductor.core.model import Coverage, StatBaseline
 
@@ -168,9 +172,9 @@ class TestRule33TransactionalCalibration:
 
     @staticmethod
     def drive(h: Harness, duration: float | None, *, seed: int = 1) -> None:
-        """The measured production shape: a fresh still observation every
-        ~2.5 s (quantized N(20, 5)), move energy quiescent (frozen value,
-        no fresh observations), one frame + one tick per second."""
+        """The measured production shape: one real sensor frame every
+        ~2.5 s (quantized N(20, 5) still energy), move energy quiescent,
+        and an independent one-second tick clock."""
         import random
 
         rng = random.Random(seed)
@@ -183,14 +187,15 @@ class TestRule33TransactionalCalibration:
             if fresh_still:
                 still_val = float(max(0, min(100, round(rng.gauss(20, 5)))))
                 next_still += 2.5
-            h.send_frame(
-                KONTOR,
-                move_e=3.0,
-                still_e=still_val,
-                fresh_move=False,
-                fresh_still=fresh_still,
-                fresh_move_energy=False,
-            )
+            if fresh_still:
+                h.send_frame(
+                    KONTOR,
+                    move_e=3.0,
+                    still_e=still_val,
+                    fresh_move=False,
+                    fresh_still=True,
+                    fresh_move_energy=False,
+                )
             h.step_to(h.now + 1.0)
 
     def test_short_window_at_measured_cadence_rejects_atomically(self) -> None:
@@ -213,9 +218,9 @@ class TestRule33TransactionalCalibration:
         assert cov["still_agg"].status is Coverage.REJECTED
         assert cov["still_agg"].fresh < 60  # ~48 at the measured cadence
         assert "need 60" in cov["still_agg"].reason
-        # Partial coverage is reported honestly: the quiescent move channel
-        # would have been accepted, the gate paths never reported.
-        assert cov["move_agg"].status is Coverage.QUIESCENT
+        # Neither the changing still channel nor the quiescent move channel
+        # has enough real sensor observations in 120 seconds.
+        assert cov["move_agg"].status is Coverage.REJECTED
         assert cov["move_gate"].status is Coverage.NO_DATA
         # Atomic: nothing half-applied, nothing lost, nothing persisted.
         assert zone.move_baseline.mu == pytest.approx(MU)
@@ -242,8 +247,99 @@ class TestRule33TransactionalCalibration:
         assert zone.move_baseline.mu == pytest.approx(0.03)
         assert zone.move_baseline.sigma == pytest.approx(0.02)  # sigma_min
         assert "still_agg" in zone.stat_cal  # empirical statistic (3.7)
+        cal = zone.stat_cal["still_agg"]
+        assert cal.decorrelation_seconds is not None
+        assert cal.decorrelation_seconds > cal.tau  # ~2.5 s observation cadence
         assert "move_agg" not in zone.stat_cal  # quiescent: analytic fallback
         assert h.persist_count == 1
+
+    def test_tick_only_cache_cannot_commit_as_quiescent(self) -> None:
+        """A cached value plus ticks is not a measured plateau. Round 5
+        incorrectly committed this as QUIESCENT and sharpened both scales
+        to sigma_min despite zero post-command sensor observations."""
+        h = Harness()
+        h.send_frame(KONTOR, move_e=20.0, still_e=30.0)
+        zone = h.zone(DESK)
+        old_move = (zone.move_baseline.mu, zone.move_baseline.sigma)
+        old_still = (zone.still_baseline.mu, zone.still_baseline.sigma)
+        old_stats = dict(zone.stat_cal)
+
+        h.submit(RecordBaseline(DESK, duration=70.0))
+        h.run(70.0)  # ticks only — no post-command SensorFrame
+
+        (event,) = h.baseline_events()
+        assert event.success is False
+        assert event.coverage["move_agg"].status is Coverage.REJECTED
+        assert event.coverage["still_agg"].status is Coverage.REJECTED
+        assert event.coverage["move_agg"].fresh == 0
+        assert event.coverage["move_agg"].observed == 0
+        assert (zone.move_baseline.mu, zone.move_baseline.sigma) == old_move
+        assert (zone.still_baseline.mu, zone.still_baseline.sigma) == old_still
+        assert zone.stat_cal == old_stats
+        assert h.persist_count == 0
+
+    def test_front_loaded_observations_then_silence_reject(self) -> None:
+        h = Harness()
+        h.submit(RecordBaseline(DESK, duration=300.0))
+        for i in range(60):
+            h.send_frame(KONTOR, move_e=float(i), still_e=float(i))
+            h.step_to(h.now + 1.0)
+        h.run(240.0)
+
+        (event,) = h.baseline_events()
+        assert event.success is False
+        assert "maximum sensor-observation gap" in event.coverage["move_agg"].reason
+        assert h.persist_count == 0
+
+    def test_sensor_unavailable_at_close_rejects(self) -> None:
+        h = Harness()
+        h.submit(RecordBaseline(DESK, duration=70.0))
+        for i in range(60):
+            h.send_frame(KONTOR, move_e=float(i), still_e=float(i))
+            h.step_to(h.now + 1.0)
+        h.submit(SensorAvailability(KONTOR, available=False))
+        h.run(10.0)
+
+        (event,) = h.baseline_events()
+        assert event.success is False
+        assert event.coverage["move_agg"].reason == "sensor unavailable when calibration closed"
+
+    def test_same_value_sensor_observations_certify_quiescence(self) -> None:
+        """Real same-value publications remain useful: the sensor-wide
+        observation clock distinguishes them from a tick-held cache."""
+        h = Harness()
+        h.submit(RecordBaseline(DESK, duration=70.0))
+        for _ in range(70):
+            h.send_frame(
+                KONTOR,
+                move_e=20.0,
+                still_e=30.0,
+                fresh_move=False,
+                fresh_still=False,
+                fresh_move_energy=False,
+            )
+            h.step_to(h.now + 1.0)
+
+        (event,) = h.baseline_events()
+        assert event.success is True
+        assert event.coverage["move_agg"].status is Coverage.QUIESCENT
+        assert event.coverage["move_agg"].fresh == 0
+        assert event.coverage["move_agg"].observed >= 60
+
+    def test_disabled_calibration_still_emits_control_outcome(self) -> None:
+        """Calibration persistence is a control-plane action while disabled;
+        its matching outcome must remain observable too."""
+        h = Harness()
+        h.submit(SetEnabled(False))
+        h.submit(RecordBaseline(DESK, duration=70.0))
+        for _ in range(70):
+            h.send_frame(KONTOR, move_e=20.0, still_e=30.0)
+            h.step_to(h.now + 1.0)
+
+        assert h.persist_count == 1
+        (event,) = h.baseline_events()
+        assert event.success is True
+        assert h.state.enabled is False
 
 
 class TestRule34BackgroundAdaptation:
@@ -261,6 +357,27 @@ class TestRule34BackgroundAdaptation:
         assert desk.move_baseline.mu < MU - 0.005  # drifted toward observed 0
         assert desk.still_baseline.mu < MU - 0.005
         assert desk.move_baseline.sigma >= 0.02  # 3.1 floor holds
+
+    def test_rule_3_4_cannot_erode_calibrated_scale_confidence_bound(self) -> None:
+        config = make_config(t_background=0.0, tau_background=1.0)
+        h = Harness(config, make_snapshot(config, sigma=0.08))
+        desk = h.zone(DESK)
+        statistic = StatBaseline(0.4, 0.6)
+        desk.stat_cal["move_agg"] = statistic
+
+        # Lower point variance may move the mean, but cannot sharpen the
+        # conservative window-fitted scale paired with this statistic.
+        for _ in range(20):
+            h.send_frame(KONTOR, move_e=5.0, still_e=5.0)
+            h.step_to(h.now + 1.0)
+        assert desk.move_baseline.sigma == pytest.approx(0.08)
+        assert desk.stat_cal["move_agg"] is statistic
+
+        # A larger empty deviation may only make the scale more conservative.
+        h.send_frame(KONTOR, move_e=20.0, still_e=5.0)
+        h.step_to(h.now + 1.0)
+        assert desk.move_baseline.sigma >= 0.08
+        assert not desk.occupied
 
     def test_rule_3_4_no_adaptation_before_t_background(self) -> None:
         h = self.make()

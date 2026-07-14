@@ -22,10 +22,15 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import DOMAIN
-from .controller import ConductorEntity, PresenceConductorController
+from .controller import (
+    CalibrationStatus,
+    ConductorEntity,
+    PresenceConductorController,
+)
 from .core.model import Activity, Health, RoomState, ZoneConfig, ZoneState
 
 ACTIVITY_OPTIONS = [activity.value for activity in Activity]
+CALIBRATION_OPTIONS = [status.value for status in CalibrationStatus]
 
 
 async def async_setup_entry(
@@ -40,6 +45,7 @@ async def async_setup_entry(
         entities.append(ZoneActivitySensor(controller, zone))
         entities.append(ZoneConfidenceSensor(controller, zone))
         entities.append(ZoneDwellSensor(controller, zone))
+        entities.append(ZoneCalibrationStatusSensor(controller, zone))
     for room_id in controller.config.room_ids():
         entities.append(RoomActivitySensor(controller, room_id))
         entities.append(RoomConfidenceSensor(controller, room_id))
@@ -130,6 +136,34 @@ class ZoneDwellSensor(ZoneSensor):
     @property
     def native_value(self) -> float:
         return round(self.zone_state.dwell_seconds, 1)
+
+
+class ZoneCalibrationStatusSensor(ConductorEntity, SensorEntity):
+    """Always-visible calibration provenance/readiness for one zone."""
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = CALIBRATION_OPTIONS
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_translation_key = "calibration_status"
+    _control_surface = True
+
+    def __init__(self, controller: PresenceConductorController, zone: ZoneConfig) -> None:
+        super().__init__(controller, room_id=zone.room_id)
+        self._zone = zone
+        self._attr_unique_id = f"{controller.entry.entry_id}_zone_{zone.zone_id}_calibration_status"
+        self._attr_name = f"{zone.name} calibration status"
+
+    @property
+    def native_value(self) -> str:
+        return self.controller.calibration_diagnostic(self._zone.zone_id).status.value
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "zone_id": self._zone.zone_id,
+            "room": self._zone.room_id,
+            **self.controller.calibration_diagnostic(self._zone.zone_id).attributes(),
+        }
 
 
 class RoomSensor(ConductorEntity, SensorEntity):
@@ -266,6 +300,10 @@ class ConductorStateSensor(ConductorEntity, SensorEntity):
                         round(zst.still_baseline.mu, 4),
                         round(zst.still_baseline.sigma, 4),
                     ],
+                    "calibration": {
+                        "status": self.controller.calibration_diagnostic(zone_id).status.value,
+                        **self.controller.calibration_diagnostic(zone_id).attributes(),
+                    },
                 }
                 for zone_id, zst in state.zones.items()
             },

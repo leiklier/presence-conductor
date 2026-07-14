@@ -88,6 +88,7 @@ class Plan:
         "_pending",
         "events",
         "persist_calibration",
+        "persist_calibration_zones",
         "suppress_outputs",
         "timer_cancels",
         "timer_starts",
@@ -99,12 +100,24 @@ class Plan:
         self.timer_starts: list[StartTimer] = []
         self.timer_cancels: list[CancelTimer] = []
         self.persist_calibration: bool = False
+        #: Zones whose calibration committed in this plan. Empty retains
+        #: the legacy adapter contract (persist all) for test doubles.
+        self.persist_calibration_zones: set[str] = set()
         self.suppress_outputs: bool = suppress_outputs
 
     def emit(self, event: EmittedEvent) -> None:
-        # 7.2: while disabled the engine emits no events.
+        # 7.2: while disabled ordinary presence-domain events are suppressed.
         if not self.suppress_outputs:
             self.events.append(event)
+
+    def emit_control(self, event: EmittedEvent) -> None:
+        """Emit an operator-requested control-plane outcome even while
+        presence publication is disabled (rule 7.2).
+
+        RecordBaseline can commit and persist while disabled, so its
+        success/rejection result must not disappear with PassBy events.
+        """
+        self.events.append(event)
 
     def start_timer(self, key: str, delay: float) -> None:
         # Starting a pending key restarts it (adapter contract).

@@ -143,8 +143,20 @@ def test_baselines_passthrough() -> None:
     """Stored baselines map to ZoneBaselines, stale zone keys included."""
     baselines = baselines_from_options(_options())
     assert baselines == {
-        "sofakrok": ZoneBaselines(move_mu=0.02, move_sigma=0.02, still_mu=0.30, still_sigma=0.05),
-        "kontor": ZoneBaselines(move_mu=0.1, move_sigma=0.1, still_mu=0.1, still_sigma=0.1),
+        "sofakrok": ZoneBaselines(
+            move_mu=0.02,
+            move_sigma=0.02,
+            still_mu=0.30,
+            still_sigma=0.05,
+            gate_indices=(),
+        ),
+        "kontor": ZoneBaselines(
+            move_mu=0.1,
+            move_sigma=0.1,
+            still_mu=0.1,
+            still_sigma=0.1,
+            gate_indices=(),
+        ),
     }
     assert baselines_from_options({}) == {}
 
@@ -196,6 +208,14 @@ def test_baselines_gates_round_trip() -> None:
     assert baselines["kontor"].gates == {}  # backward compatible (3.6)
 
 
+def test_baseline_floor_fingerprint_round_trip() -> None:
+    options = _options()
+    options["baselines"]["sofakrok"]["floor_fingerprint"] = "v1|floor"
+    baselines = baselines_from_options(options)
+    assert baselines["sofakrok"].floor_fingerprint == "v1|floor"
+    assert baselines["kontor"].floor_fingerprint is None
+
+
 def test_baselines_stats_round_trip() -> None:
     """Rule 3.7: the optional "stats" mapping becomes StatBaseline records;
     pre-3.7 baselines load without it and fall back to the analytic values."""
@@ -206,7 +226,7 @@ def test_baselines_stats_round_trip() -> None:
     }
     baselines = baselines_from_options(options)
     assert baselines["sofakrok"].stats == {
-        "move_agg": StatBaseline(mu=0.41, sigma=0.55),
-        "still_gate": StatBaseline(mu=0.9, sigma=0.62),
+        "move_agg": StatBaseline(mu=0.41, sigma=0.55, fingerprint=""),
+        "still_gate": StatBaseline(mu=0.9, sigma=0.62, fingerprint=""),
     }
     assert baselines["kontor"].stats == {}  # backward compatible (3.7)

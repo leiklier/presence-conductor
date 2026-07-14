@@ -43,7 +43,15 @@ full output set even though they fuse into one room.
 - **1.1 Frame.** The adapter coalesces a sensor's entity states into
   `SensorFrame(sensor_id, moving_distance_cm, still_distance_cm, move_energy,
   still_energy, has_target, has_moving_target, has_still_target, gate_move,
-  gate_still)` and submits it whenever any underlying entity changes.
+  gate_still)` and submits it whenever any underlying entity is reported.
+  Home Assistant routes exact same-state/same-attribute writes through the
+  entity-filtered `state_reported` event (unless force-update makes them
+  `state_changed`); the adapter subscribes to both, so observation freshness
+  does not depend on ESPHome `force_update: true`. A same-value
+  attribute-changing `state_changed` event still updates the cached entity
+  view, but conservatively does not certify a new radar observation: Home
+  Assistant cannot distinguish a real sample attribute from metadata churn,
+  and cached high energy must not confirm its own fast-attack candidate.
   Distance and energy fields carry the **last reported** value (`None` only
   when never reported / unparseable): the device deduplicates identical
   publishes, so a frozen value is normal and the adapter must not null a
@@ -74,7 +82,9 @@ full output set even though they fuse into one room.
   deployed sensor) void the certification and are **unsupported**:
   deployments must keep energy reporting unfiltered (the 8.1 overlay
   pins this). The engine keys held-value handling (3.8) and attack
-  freshness (4.2) on these counters, never on value comparison. Energies are 0–100, `None` when unknown. `gate_move`/`gate_still` carry the
+  freshness (4.2) on these counters, never on value comparison. Unknown,
+  unavailable, removed, and attribute-only HA events do not advance an
+  observation counter. Energies are 0–100, `None` when unknown. `gate_move`/`gate_still` carry the
   per-gate energies of engineering mode (2.4–2.6): nine elements — one per
   LD2410 distance gate `g0..g8` — with `None` for gates the device does not
   currently report; the whole tuple is `None` when the sensor has no gate
@@ -85,11 +95,14 @@ full output set even though they fuse into one room.
   Ticks only guarantee a floor on how often time advances: integration is
   chronological on *every* event (4.1), so outputs are invariant to tick
   cadence and scheduler delays.
-- **1.3 Staleness.** If a sensor delivers no frame for
+- **1.3 Staleness.** If a sensor delivers no measured observation for
   `stale_after` (default 30 s) while any of its zones is occupied, or its
   entities become unavailable, its zones enter `UNKNOWN` health: outputs hold
   their last state, `confidence` is marked stale, and room fusion ignores
-  the zone (6.3). Recovery is immediate on the next frame.
+  the zone (6.3). Recovery is immediate on the next measured observation;
+  cached frames emitted for attribute-only or invalid entity events neither
+  re-arm the watchdog nor recover health. Every watchdog firing clears any
+  pending fast-attack chain, including while all zones remain empty.
 - **1.4 Unit hygiene.** Energies — aggregate and per-gate — are normalized
   to [0, 1] on ingest. Distances stay in cm. Out-of-range values are
   clamped, never rejected.
@@ -181,7 +194,8 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   by 25–40%, and *every* future score is inflated by that error — an
   underestimated scale is a hazard, not a calibration. So
   `sigma = MAD_TO_SIGMA · (UCB(median |deviation|) + energy_quantum / 2)`,
-  floored by `sigma_min`, where `UCB` is the one-sided upper confidence
+  floored by `max(sigma_min, MAD_TO_SIGMA · energy_quantum / 2)`, where
+  `UCB` is the one-sided upper confidence
   bound for a median: the k-th order statistic of the absolute deviations
   with `k = ceil(n/2 + z · n / (2 · sqrt(n_eff)))`, where
   `n_eff = n(1 − ρ̂)/(1 + ρ̂)` discounts the trial count for dependence
@@ -202,8 +216,12 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   **distinct observations** —
   consecutive duplicate values are collapsed first, because
   held/deduplicated rows repeat one measurement and a rank bound computed
-  over repeats overstates its confidence. A channel whose distinct samples span at most one quantum is
-  *quiescent* and calibrates to `(value, sigma_min)` directly; a channel
+  over repeats overstates its confidence. A channel whose distinct samples
+  span at most one quantum is *quiescent* only when at least
+  `stat_min_rows` tick intervals were certified by real sensor-frame
+  observations, and calibrates directly to the same quantization-aware
+  hard floor; ticks
+  repeating a silent sensor cache do **not** certify quiescence. A channel
   with fewer than `stat_min_rows` distinct samples that is not quiescent
   keeps its previous floor — re-run with a longer `duration` instead.
   Stated assumptions (this is **not** distribution-free end to end): the
@@ -279,24 +297,51 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   paths (`move_agg`/`still_agg`/`move_gate`/`still_gate`) is classified:
   `calibrated` (enough distinct observations for a floor and enough fresh
   rows for a statistic), `quiescent` (the channel's values span at most
-  one quantum over at least `stat_min_rows` rows — the empty signal
-  simply never moves; floor `(median, sigma_min)`, analytic statistic —
+  one quantum over at least `stat_min_rows` sensor-observed rows — the empty signal
+  simply never moves; floor at the median with the quantization-aware hard
+  scale floor, analytic statistic —
   accepted and *reported as such*), `no_data` (the channel never reported
   during the window; nothing to calibrate, previous values kept), or
   `rejected` (data present but too few fresh/distinct observations, with
   the counts as the reason). **Required paths** are the aggregates plus,
-  iff `use_gate_evidence` is on and the zone owns gates, the gate paths.
-  The commit is **atomic**: if any required path is `rejected`, *nothing*
+  iff `use_gate_evidence` is on and the sensor has configured gate entities,
+  each configured gate channel (`move_gate` and/or `still_gate`).
+  A gate path is one atomic family: every owned gate that may participate
+  at runtime must have a certified candidate floor. Missing/insufficient
+  gates reject that family; when it is optional, all of its previous
+  floors and statistic survive unchanged rather than accepting a partial
+  max distribution.
+  Coverage must span the stated window: the sensor must be available at
+  close and no interval without a real sensor observation may exceed
+  `stale_after`. Enough samples front-loaded before a long outage do not
+  constitute a valid calibration.
+  The commit is **atomic**: unless every required path is `calibrated` or
+  validly `quiescent`, *nothing*
   is applied — the previous floors and the previous statistic calibration
   survive untouched, nothing is persisted, and the outcome reports
   failure. A rejected window must never silently clear a valid
   calibration or half-apply one. Only a committed window persists.
+  New persisted records are bound to the sensor that produced them; moving
+  a zone to another sensor invalidates its saved floors and statistics.
   **Observability:** every window close emits `BaselineRecorded` with
-  `success`, the per-path coverage (status, row/fresh/distinct counts,
+  `success`, the per-path coverage
+  (status, row/fresh/distinct/sensor-observed counts,
   rejection reason) and the committed floors; the adapter surfaces it as
   a Home Assistant event and a per-zone diagnostic event entity, and logs
   rejections as warnings — the calibration button must never look
-  successful when a required channel was not calibrated.
+  successful when a required channel was not calibrated. Calibration is
+  an operator-requested control-plane action, so this outcome remains
+  visible while presence outputs are disabled; occupancy and pass-by
+  publication remain suppressed.
+  Startup/reload compatibility is independently observable: every zone has
+  an enabled diagnostic calibration-status entity (`ready`, `uncalibrated`,
+  `recalibration_required`, or `calibrating`) with bounded reason codes,
+  human-readable reasons, the active aggregate/gate runtime source, and the
+  empirical/analytic statistic source. Any non-ready zone creates one
+  nonpersistent warning in Home Assistant Repairs for the config entry; it
+  names all affected zones and is removed only when every zone is ready.
+  Enabling gate evidence with a configured gate channel but no complete,
+  compatible gate family is explicitly reported as aggregate fallback.
   **Lifecycle:** while the window is open the zone's estimator is
   **suspended** — the operator has asserted emptiness, so scoring the
   incoming frames against the old (possibly wrong) floors would let the
@@ -313,7 +358,12 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   `(mu, sigma)` follow the observed energies with a slow EMA
   (`tau_background`, default 1 h); the deviation target carries the same
   half-quantum guard as 3.1 (the EMA's sampling error is negligible at its
-  time constant, the quantization bias is not). Adaptation freezes the
+  time constant, the quantization bias is not). Between explicit baselines,
+  `sigma` may only rise: the window fitted a one-sided upper-confidence
+  scale, so a point-estimate EMA must not silently erode that safety margin.
+  `mu` remains free to track drift; a rising scale is conservative for the
+  retained statistic calibration. A new transactional RecordBaseline may
+  lower `sigma` when its observation coverage supports doing so. Adaptation freezes the
   moment the confidence rises. This tracks seasonal/furniture drift without learning a
   person as noise. Adaptation moves the floors only; the statistic
   calibration (3.7) refreshes only on RecordBaseline, so large drift
@@ -328,15 +378,16 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   channel, calibration maintains a `(mu, sigma)` floor — spatial background
   subtraction: a fan or appliance elevating one gate gets its own floor
   there and stops polluting the whole zone. `RecordBaseline` (3.3) collects
-  per-gate samples alongside the aggregates and replaces the floor of every
-  gate that produced samples; gates that reported nothing keep their
-  previous floor. Background adaptation (3.4) extends per gate under the
-  same eligibility, clock and freeze conditions. A gate without a recorded
-  or adapted floor scores against the `default_mu`/`default_sigma`
-  tunables. Persisted per-zone baselines gain an optional `gates` mapping
-  (gate index → per-channel `(mu, sigma)`); baselines stored without it
-  load unchanged, and zones without per-gate floors persist without it —
-  the schema is backward compatible in both directions.
+  per-gate samples alongside the aggregates and atomically replaces the
+  complete owned-gate family for that channel. Background adaptation (3.4)
+  extends existing floors under the same eligibility, clock and freeze
+  conditions, but never makes an uncalibrated family runtime-ready. Until a
+  complete current family commits, gate data falls back to the aggregate
+  path; default floors are not treated as a calibration. Persistence records
+  channel presence, the exact owned-gate set, and the sensor's gate
+  resolution. Missing legacy metadata, changed zone ownership/resolution,
+  or an incomplete family invalidates that gate path safely while leaving
+  aggregate floors usable.
 - **3.7 Statistic calibration.** Per zone, per channel and per evidence
   path (gate / aggregate), calibration produces `(m0, s0, c0)` — the mean
   and standard deviation of the raw statistic `S` (3.2) over the
@@ -372,9 +423,21 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   conservative engineering approximation validated empirically, not a
   formal confidence bound) — yields
   `τ̂ = clamp((1 + ρ̂)/(1 − ρ̂), 1, tau_int_max)` (AR(1)
-  assumption, `tau_int_max` default 25), stored with the statistic and
-  applied at runtime by 3.2's score division **and** by 4.2's
-  confirmation spacing. A path whose fresh rows fall below `stat_min_rows`
+  assumption, `tau_int_max` default 25). The dimensionless `τ̂` divides
+  3.2's score. Separately, the median physical interval between those fresh
+  rows converts it to a decorrelation time in seconds for 4.2; observation
+  indices are never compared directly with wall-clock seconds. Persisted
+  default, persisted aggregate, and persisted per-gate scales are always
+  clamped to the current quantization-aware hard floor on load. Every newly
+  persisted baseline carries an always-present versioned floor-fit fingerprint
+  (`sigma_min` and `energy_quantum`), including a quiescent window that stores
+  no empirical statistic. A mismatch discards its fitted floors and requires
+  recalibration. Persisted statistics separately carry a versioned fingerprint
+  of the path, exact owned-gate set, floor-fit settings, and score transform;
+  a mismatch after zone/tunable edits discards the empirical statistic and uses
+  the analytic fallback. Changing the energy quantum therefore requires a fresh
+  RecordBaseline for a complete UCB fit; the default floor prevents one
+  reporting step from becoming a rare-tail attack in the meantime. A path whose fresh rows fall below `stat_min_rows`
   keeps the analytic fallback — the transactional coverage rules (3.3)
   decide whether the window as a whole commits.
 - **3.8 Held evidence and the observation clock.** The integrator (4.1)
@@ -417,12 +480,14 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   (default corresponding to a confidence of 0.02) and `tau_decay` defaults
   to 90 s. The relaxation implements the hazard of departure; there is no
   fixed occupancy timeout anywhere in the engine.
-- **4.2 Fast attack.** Attack candidacy is a **tail-probability event on
+- **4.2 Fast attack.** Attack candidacy is a **nominal Gaussian
+  tail-probability event on
   the raw statistic**, not a centered-score threshold: a gated move
   observation qualifies iff its raw `S` exceeds the analytic threshold
   `Φ⁻¹((1 − attack_tail)^(1/m))` for the path's gate count (`m` owned
   gates, or 1 on the aggregate path; `attack_tail_ppm` defaults to 100
-  parts per million — 1e-4 per observation). Mean/std standardization does not equalize *tails* across
+  parts per million — 1e-4 per observation under the iid Gaussian empty
+  model, not a distribution-free false-alarm guarantee). Mean/std standardization does not equalize *tails* across
   gate counts — a centered threshold of 4.5 fires ~10× more often for one
   gate than for three — and a 120 s calibration window cannot estimate a
   1e-4 tail, so attack thresholds are always analytic (3.7), never
@@ -433,21 +498,32 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   at least `g` and at most `G`. Under the analytic fallback (`τ̂ = 1`)
   these are the raw tunables: `g = attack_gap_min` (default 0.3 s),
   `G = attack_gap_max` (default 3 s). When the path in force carries a
-  **calibrated dependence estimate** `τ̂ > 1` (3.7), the spacing scales
-  with it: `g = max(attack_gap_min, τ̂)` and
-  `G = attack_gap_max · g / attack_gap_min`. Rationale: confirmation is
-  meant to *square* the per-observation tail, which requires the
+  **calibrated physical decorrelation estimate** `d̂` (3.7), the spacing
+  uses `g = max(attack_gap_min, d̂)` and the original configured
+  window width is preserved, `G = g + max(0, attack_gap_max −
+  attack_gap_min)`. The options flow requires `attack_gap_max >
+  attack_gap_min`; the core restores the default 2.7 s window width for
+  invalid legacy pairs. The core defensively applies a small positive spacing
+  to legacy configurations that stored `attack_gap_min = 0`; that floor is
+  0.1 s, matching the current UI minimum and keeping a millisecond entity
+  flurry from one radar packet to one confirmation. Rationale: confirmation is
+  meant to make the joint tail much smaller, which requires the
   confirming observations to be approximately independent under H0. For
   AR(1) empty noise the correlation at spacing `s` is `ρ^s` and
-  `τ̂ = (1 + ρ)/(1 − ρ)`, so spacing `g = τ̂` leaves residual
-  correlation `ρ^τ̂ ≈ e⁻²` — two exceedances 1 s apart at ρ = 0.9 are
+  `τ̂ = (1 + ρ)/(1 − ρ)`, so spacing by the calibrated physical equivalent
+  leaves residual correlation around `ρ^τ̂ ≈ e⁻²`; this is approximately
+  independent, not a claim that the joint probability is exactly the
+  squared nominal tail. Two exceedances 1 s apart at ρ = 0.9 are
   by contrast essentially *one* tail event, and confirmation collapses
   to candidacy (measured: 2/200 false-occupied hours through the attack
   path on 9-gate ρ = 0.9 noise, zero through the accumulator). The cost
   is honest latency: in a room whose *empty* noise is that dependent,
   the information rate is genuinely ~τ̂ times lower. Field-calibrated
   aggregate move channels are quiescent when empty (`τ̂ = 1`), so
-  production entry latency is unchanged. *Fresh* means the frame's
+  production entry latency is unchanged. A confirmation chain is bound
+  to the evidence path that started it: a gate-path candidate and an
+  aggregate-path candidate can never confirm one another, and any path
+  switch resets the chain. *Fresh* means the frame's
   `move_energy_obs` counter (1.1) advanced — a new move-energy or
   gate-move measurement was actually reported. The adapter re-emits its complete cached frame on
   **any** entity change, so an unrelated update (a still-energy
@@ -552,7 +628,8 @@ A per-zone FSM driven by the occupancy belief and channel dominance:
   `theta_on` (someone plainly there should not wait out a cold start).
 - **7.2 Disabled.** A global `enabled` switch: while off, the engine keeps
   ingesting frames and updating state (so re-enable is warm) but publishes no
-  transitions and emits no events.
+  presence transitions or pass-by events. Explicit operator control outcomes
+  such as baseline success/rejection remain observable.
 - **7.3 Determinism.** Same event sequence + timestamps ⇒ same outputs.
   All tunables live in one `Tunables` dataclass; nothing reads config at
   update time.

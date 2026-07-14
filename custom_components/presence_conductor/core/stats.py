@@ -16,8 +16,50 @@ from __future__ import annotations
 import math
 from functools import lru_cache
 from statistics import NormalDist
+from typing import TYPE_CHECKING
 
 from .events import GATE_COUNT
+
+if TYPE_CHECKING:
+    from .model import Tunables
+
+
+def floor_calibration_fingerprint(t: Tunables) -> str:
+    """Stable compatibility key for persisted empty-channel floor fits.
+
+    Unlike statistic calibration, the robust location/scale fit is shared by
+    aggregate and gate channels.  Keep this key present even for a perfectly
+    quiescent window, where no empirical statistic calibration is stored.
+    """
+    return "|".join(
+        (
+            "v1",
+            f"floor_min={t.sigma_min:.17g}",
+            f"quantum={t.energy_quantum:.17g}",
+        )
+    )
+
+
+def calibration_fingerprint(path: str, owned: tuple[int, ...], t: Tunables) -> str:
+    """Stable compatibility key for a persisted statistic calibration.
+
+    Empirical centering depends on the exact max-statistic family and score
+    transform. A version prefix makes future estimator changes fail closed.
+    """
+    gates = ",".join(str(index) for index in owned) if path.endswith("_gate") else "-"
+    return "|".join(
+        (
+            "v1",
+            path,
+            f"g={gates}",
+            f"neg={t.z_neg_cap:.17g}",
+            f"pos={t.z_cap:.17g}",
+            f"floor_min={t.sigma_min:.17g}",
+            f"quantum={t.energy_quantum:.17g}",
+            f"stat_min={t.stat_sigma_min:.17g}",
+            f"tau_max={t.tau_int_max:.17g}",
+        )
+    )
 
 
 def _phi(x: float) -> float:
@@ -102,7 +144,7 @@ def attack_threshold(m: int, tail: float) -> float:
 
     Mean/std standardization does not equalize tails across gate counts —
     a fixed centered threshold fires ~10x more often for one gate than for
-    three — so attack candidacy thresholds on the tail probability of the
+    three — so attack candidacy thresholds on the nominal Gaussian tail of the
     max itself: ``P(S >= s) = 1 - Phi(s)^m``.
     """
     m = max(1, m)

@@ -95,6 +95,7 @@ class ConductorEngine:
         """Adopt current entity states (rule 7.1). Timeless: timestamps and
         timers are stamped by :meth:`start`."""
         t = self.config.tunables
+        sigma_floor = evidence.floor_sigma_min(t.sigma_min, t.energy_quantum)
         state = self.state
         state.enabled = snapshot.enabled  # 7.2
         state.lam_home = self.lam_prior  # 6.5
@@ -104,26 +105,72 @@ class ConductorEngine:
             )
         for zone in self.config.zones:
             persisted = snapshot.baselines.get(zone.zone_id)
+            calibration_context_valid = (
+                persisted is not None
+                and (persisted.sensor_id is None or persisted.sensor_id == zone.sensor_id)
+                and (
+                    persisted.floor_fingerprint is None
+                    or persisted.floor_fingerprint == stats.floor_calibration_fingerprint(t)
+                )
+            )
+            trusted = persisted if calibration_context_valid else None
             zst = ZoneState(
                 lam=self.lam_prior,  # 7.1: beliefs start at the prior
-                move_baseline=ChannelStats(persisted.move_mu, persisted.move_sigma)
-                if persisted
-                else ChannelStats(t.default_mu, t.default_sigma),
-                still_baseline=ChannelStats(persisted.still_mu, persisted.still_sigma)
-                if persisted
-                else ChannelStats(t.default_mu, t.default_sigma),
+                move_baseline=ChannelStats(trusted.move_mu, max(sigma_floor, trusted.move_sigma))
+                if trusted
+                else ChannelStats(t.default_mu, max(sigma_floor, t.default_sigma)),
+                still_baseline=ChannelStats(trusted.still_mu, max(sigma_floor, trusted.still_sigma))
+                if trusted
+                else ChannelStats(t.default_mu, max(sigma_floor, t.default_sigma)),
             )
-            if persisted is not None:
+            if trusted is not None:
+                persisted = trusted
+                owned = self.owned_gates[zone.zone_id]
+                gate_context_valid = (
+                    persisted.gate_indices is None or persisted.gate_indices == owned
+                ) and (
+                    persisted.gate_size_cm is None
+                    or persisted.gate_size_cm == self.config.sensor(zone.sensor_id).gate_size_cm
+                )
                 # 3.6: persisted per-gate floors; zones stored before
-                # per-gate evidence existed simply have none.
-                for index in sorted(persisted.gates):
-                    gate = persisted.gates[index]
-                    zst.gate_move_baselines[index] = ChannelStats(gate.move_mu, gate.move_sigma)
-                    zst.gate_still_baselines[index] = ChannelStats(gate.still_mu, gate.still_sigma)
+                # compatibility metadata existed simply fall back to the
+                # aggregate path until a current complete family commits.
+                move_indices = {index for index, gate in persisted.gates.items() if gate.has_move}
+                still_indices = {index for index, gate in persisted.gates.items() if gate.has_still}
+                move_complete = (
+                    set(owned).issubset(move_indices)
+                    if persisted.gate_indices is None
+                    else move_indices == set(owned)
+                )
+                still_complete = (
+                    set(owned).issubset(still_indices)
+                    if persisted.gate_indices is None
+                    else still_indices == set(owned)
+                )
+                if gate_context_valid and (persisted.gate_indices is None or move_complete):
+                    for index in sorted(move_indices) if persisted.gate_indices is None else owned:
+                        gate = persisted.gates[index]
+                        zst.gate_move_baselines[index] = ChannelStats(
+                            gate.move_mu, max(sigma_floor, gate.move_sigma)
+                        )
+                    zst.gate_move_ready = bool(owned) and move_complete
+                if gate_context_valid and (persisted.gate_indices is None or still_complete):
+                    for index in sorted(still_indices) if persisted.gate_indices is None else owned:
+                        gate = persisted.gates[index]
+                        zst.gate_still_baselines[index] = ChannelStats(
+                            gate.still_mu, max(sigma_floor, gate.still_sigma)
+                        )
+                    zst.gate_still_ready = bool(owned) and still_complete
                 # 3.7: persisted statistic calibration; missing keys (and
                 # pre-3.7 baselines) fall back to the analytic values.
                 for key in sorted(persisted.stats):
-                    zst.stat_cal[key] = persisted.stats[key]
+                    cal = persisted.stats[key]
+                    expected = stats.calibration_fingerprint(key, owned, t)
+                    path_ready = not key.endswith("_gate") or (
+                        zst.gate_move_ready if key == "move_gate" else zst.gate_still_ready
+                    )
+                    if path_ready and (cal.fingerprint is None or cal.fingerprint == expected):
+                        zst.stat_cal[key] = cal
             if not state.sensors[zone.sensor_id].available:
                 zst.health = Health.UNKNOWN  # 1.3
             state.zones[zone.zone_id] = zst
@@ -145,6 +192,7 @@ class ConductorEngine:
             sensor_state = state.sensors[sensor.sensor_id]
             sensor_state.move_obs = frame.move_obs
             sensor_state.still_obs = frame.still_obs
+            sensor_state.frame_obs = frame.frame_obs
             sensor_state.move_energy_obs = frame.move_energy_obs
             evidence.ingest_frame(self, frame, None)
             for zone in self.config.zones_for_sensor(sensor.sensor_id):
@@ -193,7 +241,7 @@ class ConductorEngine:
                 # 4.1 made ticks pure clock: integration already happened in
                 # _advance. What remains is the tick-aligned calibration
                 # sampling (3.3).
-                evidence.collect_baseline_rows(self)
+                evidence.collect_baseline_rows(self, now)
             case SensorAvailability():
                 health.on_availability(self, event, now, plan)  # 1.3
             case SetEnabled():
@@ -247,7 +295,12 @@ class ConductorEngine:
     def _on_frame(self, frame: SensorFrame, now: float, plan: Plan) -> None:
         if frame.sensor_id not in self.state.sensors:
             return  # unknown sensor: ignore
-        health.on_frame(self, frame.sensor_id, now, plan)  # 1.3 first: recovery
+        sensor = self.state.sensors[frame.sensor_id]
+        # A cached frame emitted for an attribute-only/invalid HA event is
+        # useful for no new evidence, but it is not proof that the radar is
+        # alive. Only a real observation epoch may recover/re-arm health.
+        measurement_fresh = frame.frame_obs != sensor.frame_obs
+        health.on_frame(self, frame.sensor_id, now, plan, measurement_fresh)  # 1.3
         evidence.apply_frame(self, frame, now)  # 1.4, 2, 3.2-3.4
         filter_.on_frame(self, frame, now, plan)  # 4.2, 4.4
         # 6.5: submit()'s fusion refresh runs after this, so occupancy

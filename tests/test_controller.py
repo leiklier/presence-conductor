@@ -20,13 +20,19 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
+from custom_components.presence_conductor.config import baselines_from_options
 from custom_components.presence_conductor.const import DOMAIN, GATE_COUNT
+from custom_components.presence_conductor.core.engine import ConductorEngine
 from custom_components.presence_conductor.core.events import (
     SensorAvailability,
     SensorFrame,
     Tick,
 )
-from custom_components.presence_conductor.core.model import ChannelStats, GateBaselines
+from custom_components.presence_conductor.core.model import (
+    ChannelStats,
+    GateBaselines,
+    InitialSnapshot,
+)
 from custom_components.presence_conductor.core.plan import PassBy
 from tests.fake_engine import FakeEngine
 
@@ -159,6 +165,7 @@ async def test_engine_started_with_monotonic_now(hass: HomeAssistant, monkeypatc
         still_energy=2.0,
         move_obs=frame.move_obs,
         still_obs=frame.still_obs,
+        frame_obs=frame.frame_obs,
         move_energy_obs=frame.move_energy_obs,
     )
     assert fake.snapshot.baselines["sofakrok"].still_mu == 0.3
@@ -191,6 +198,7 @@ async def test_any_entity_change_produces_complete_frame(hass: HomeAssistant, mo
         still_energy=2.0,
         move_obs=frame.move_obs,
         still_obs=frame.still_obs,
+        frame_obs=frame.frame_obs,
         move_energy_obs=frame.move_energy_obs,
     )
     first_move_obs = frame.move_obs
@@ -217,6 +225,7 @@ async def test_any_entity_change_produces_complete_frame(hass: HomeAssistant, mo
         has_moving_target=True,
         move_obs=frame.move_obs,
         still_obs=frame.still_obs,
+        frame_obs=frame.frame_obs,
         move_energy_obs=frame.move_energy_obs,
     )
 
@@ -234,20 +243,65 @@ async def test_unknown_fields_are_none(hass: HomeAssistant, monkeypatch) -> None
     """A non-required entity going unavailable blanks its field only."""
     _, _controller, fake = await setup_conductor(hass, monkeypatch)
 
+    hass.states.async_set(KONTOR_ENTITIES["still_distance"], "123.0")
+    await hass.async_block_till_done()
+    before = fake.events_of(SensorFrame)[-1]
     hass.states.async_set(KONTOR_ENTITIES["still_distance"], "unavailable")
     await hass.async_block_till_done()
     frame = fake.events_of(SensorFrame)[-1]
     assert frame.still_distance_cm is None
     assert frame.move_energy == 2.0
+    assert frame.still_obs == before.still_obs
+    assert frame.frame_obs == before.frame_obs
     assert fake.events_of(SensorAvailability) == []  # distances are not required
+
+
+async def test_attribute_only_state_event_is_not_a_measurement(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    _, _controller, fake = await setup_conductor(hass, monkeypatch)
+    entity = KONTOR_ENTITIES["move_energy"]
+    hass.states.async_set(entity, "42.0", {"marker": 1})
+    await hass.async_block_till_done()
+    before = fake.events_of(SensorFrame)[-1]
+
+    hass.states.async_set(entity, "42.0", {"marker": 2})
+    await hass.async_block_till_done()
+    after = fake.events_of(SensorFrame)[-1]
+    assert after.move_obs == before.move_obs
+    assert after.move_energy_obs == before.move_energy_obs
+    assert after.frame_obs == before.frame_obs
+
+
+async def test_same_value_state_reported_is_a_measurement(hass: HomeAssistant, monkeypatch) -> None:
+    _, _controller, fake = await setup_conductor(hass, monkeypatch)
+    entity = KONTOR_ENTITIES["move_energy"]
+    hass.states.async_set(entity, "42.0")
+    await hass.async_block_till_done()
+    before = fake.events_of(SensorFrame)[-1]
+
+    # Exact same state + attributes emits state_reported in HA, even when
+    # the source entity does not opt into force_update.
+    hass.states.async_set(entity, "42.0")
+    await hass.async_block_till_done()
+    after = fake.events_of(SensorFrame)[-1]
+    assert after.move_obs == before.move_obs + 1
+    assert after.move_energy_obs == before.move_energy_obs + 1
+    assert after.frame_obs == before.frame_obs + 1
 
 
 async def test_non_numeric_state_is_none(hass: HomeAssistant, monkeypatch) -> None:
     _, _controller, fake = await setup_conductor(hass, monkeypatch)
 
+    hass.states.async_set(KONTOR_ENTITIES["moving_distance"], "123.0")
+    await hass.async_block_till_done()
+    before = fake.events_of(SensorFrame)[-1]
     hass.states.async_set(KONTOR_ENTITIES["moving_distance"], "not-a-number")
     await hass.async_block_till_done()
-    assert fake.events_of(SensorFrame)[-1].moving_distance_cm is None
+    after = fake.events_of(SensorFrame)[-1]
+    assert after.moving_distance_cm is None
+    assert after.move_obs == before.move_obs
+    assert after.frame_obs == before.frame_obs
 
 
 async def test_detection_distance_produces_no_frame(hass: HomeAssistant, monkeypatch) -> None:
@@ -486,6 +540,9 @@ async def test_persist_calibration_writes_options_without_reload(
         "move_sigma": 0.021,
         "still_mu": 0.062,
         "still_sigma": 0.02,
+        "sensor_id": KONTOR,
+        "floor_fingerprint": "v1|floor_min=0.02|quantum=0.01",
+        "gate_size_cm": 75.0,
     }
     # Every configured zone is captured; stored keys survive the merge.
     assert set(entry.options["baselines"]) == {"kontor_pult", "kontor_dor", "sofakrok"}
@@ -500,20 +557,26 @@ async def test_persist_calibration_includes_gate_floors(hass: HomeAssistant, mon
     entry, controller, fake = await setup_conductor(hass, monkeypatch)
 
     zst = fake.state.zones["kontor_pult"]
-    zst.gate_move_baselines[2] = ChannelStats(0.011, 0.021)
-    zst.gate_still_baselines[2] = ChannelStats(0.012, 0.022)
-    zst.gate_move_baselines[3] = ChannelStats(0.013, 0.023)  # move-only gate
+    owned = fake.owned_gates["kontor_pult"]
+    zst.gate_move_baselines = {index: ChannelStats(0.011 + index / 1000, 0.021) for index in owned}
+    zst.gate_move_ready = True
+    zst.gate_still_baselines = {}  # rejected/absent optional counterpart
+    zst.gate_still_ready = False
     fake.script(fake.plan(persist=True))
     controller.submit(Tick())
     await hass.async_block_till_done()
 
     stored = entry.options["baselines"]["kontor_pult"]
-    assert stored["gates"] == {
-        # The gate seen on one channel only persists the Tunables defaults
-        # for the other - what the engine would score with anyway.
-        "2": {"move_mu": 0.011, "move_sigma": 0.021, "still_mu": 0.012, "still_sigma": 0.022},
-        "3": {"move_mu": 0.013, "move_sigma": 0.023, "still_mu": 0.1, "still_sigma": 0.1},
-    }
+    assert stored["gate_indices"] == list(owned)
+    assert set(stored["gates"]) == {str(index) for index in owned}
+    assert all(gate["has_move"] and not gate["has_still"] for gate in stored["gates"].values())
+    reloaded = ConductorEngine(
+        controller.config,
+        InitialSnapshot(baselines=baselines_from_options(entry.options)),
+    ).state.zones["kontor_pult"]
+    assert reloaded.gate_move_ready
+    assert not reloaded.gate_still_ready
+    assert reloaded.gate_still_baselines == {}
     assert "gates" not in entry.options["baselines"]["kontor_dor"]  # v0.1.0 schema
 
 
@@ -647,5 +710,8 @@ async def test_unload_stops_ticks_and_timers(hass: HomeAssistant, monkeypatch, f
 
     # State changes no longer reach the (stopped) engine either.
     hass.states.async_set(KONTOR_ENTITIES["move_energy"], "50")
+    await hass.async_block_till_done()
+    assert len(fake.events) == submitted
+    hass.states.async_set(KONTOR_ENTITIES["move_energy"], "50")  # state_reported too
     await hass.async_block_till_done()
     assert len(fake.events) == submitted

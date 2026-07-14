@@ -96,6 +96,8 @@ def baselines_from_options(options: Mapping[str, Any]) -> dict[str, ZoneBaseline
             move_sigma=float(b["move_sigma"]),
             still_mu=float(b["still_mu"]),
             still_sigma=float(b["still_sigma"]),
+            sensor_id=str(b["sensor_id"]) if "sensor_id" in b else None,
+            gate_size_cm=float(b["gate_size_cm"]) if "gate_size_cm" in b else None,
             # Rule 3.6: optional per-gate floors. Baselines stored before
             # per-gate evidence existed (v0.1.0) have no "gates" key; gate
             # indices are stored as strings because options are JSON.
@@ -105,9 +107,15 @@ def baselines_from_options(options: Mapping[str, Any]) -> dict[str, ZoneBaseline
                     move_sigma=float(g["move_sigma"]),
                     still_mu=float(g["still_mu"]),
                     still_sigma=float(g["still_sigma"]),
+                    has_move=bool(g.get("has_move", True)),
+                    has_still=bool(g.get("has_still", True)),
                 )
                 for index, g in (b.get("gates") or {}).items()
             },
+            gate_indices=(
+                tuple(int(index) for index in b["gate_indices"]) if "gate_indices" in b else ()
+            ),
+            floor_fingerprint=(str(b["floor_fingerprint"]) if "floor_fingerprint" in b else None),
             # Rule 3.7: optional statistic calibration. Baselines stored
             # before 3.7 have no "stats" key and fall back to the analytic
             # values.
@@ -117,6 +125,14 @@ def baselines_from_options(options: Mapping[str, Any]) -> dict[str, ZoneBaseline
                     sigma=float(s["sigma"]),
                     clip_mu=float(s.get("clip_mu", 0.0)),
                     tau=float(s.get("tau", 1.0)),
+                    decorrelation_seconds=(
+                        float(s["decorrelation_seconds"])
+                        if s.get("decorrelation_seconds") is not None
+                        else None
+                    ),
+                    # Missing v0.4 metadata is deliberately invalid rather
+                    # than silently trusted under a changed transform.
+                    fingerprint=str(s.get("fingerprint", "")),
                 )
                 for key, s in (b.get("stats") or {}).items()
             },

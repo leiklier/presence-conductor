@@ -57,6 +57,10 @@ class SensorFrame(Event):
     #: Move-energy observations only (move_energy or gate-move entities);
     #: consumed by the fast-attack confirmation (4.2).
     move_energy_obs: int = 0
+    #: Any supported sensor-entity observation. Calibration uses this
+    #: sensor-wide epoch to distinguish a genuinely re-observed plateau
+    #: from a cache repeated by ticks while the device is silent (3.3).
+    frame_obs: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +89,7 @@ class RecordBaseline(Event):
     """Start a baseline calibration window for one zone (rule 3.3).
 
     ``duration`` is the collection window in seconds; ``None`` uses
-    ``Tunables.baseline_duration`` (default 120 s). The operator asserts the
+    ``Tunables.baseline_duration`` (default 300 s). The operator asserts the
     zone is empty for the window.
     """
 

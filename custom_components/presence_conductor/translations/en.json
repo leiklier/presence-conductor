@@ -74,6 +74,7 @@
       "duplicate_zone_name": "Another zone already uses this name. Zone names must be unique.",
       "invalid_room_name": "The room name must contain at least one letter or digit.",
       "invalid_zone_range": "The far edge must be greater than the near edge.",
+      "invalid_attack_gap": "Attack gap maximum must be greater than attack gap minimum.",
       "multiple_fallback_zones": "This sensor already has a fallback zone. At most one zone per sensor can be the fallback."
     },
     "abort": {
@@ -196,7 +197,7 @@
           "u_cap": "Evidence rate cap",
           "tau_decay": "Decay time constant",
           "p_prior": "Empty prior",
-          "attack_tail_ppm": "Attack tail probability (ppm)",
+          "attack_tail_ppm": "Nominal Gaussian attack tail (ppm)",
           "attack_confirm": "Attack confirmation frames",
           "attack_gap_min": "Attack confirmation min gap",
           "attack_gap_max": "Attack confirmation max gap",
@@ -240,7 +241,7 @@
           "u_cap": "Upward cap on the per-second evidence rate — one wild sample must not out-accumulate a genuine entry.",
           "tau_decay": "Relaxation time constant of the belief toward the empty prior (the departure hazard — there is no fixed occupancy timeout).",
           "p_prior": "Empty-state prior confidence the belief decays toward.",
-          "attack_tail_ppm": "Per-observation tail probability, in parts per million, of the raw move statistic that makes it an attack candidate; the threshold is analytic and gate-count corrected.",
+          "attack_tail_ppm": "Nominal per-observation Gaussian tail, in parts per million, of the raw move statistic that makes it an attack candidate. It is analytic and gate-count corrected, not a distribution-free false-alarm guarantee.",
           "attack_confirm": "Qualifying frames needed to fire the fast attack (1 restores single-frame attack).",
           "attack_gap_min": "Minimum spacing between the candidate and the confirming frame.",
           "attack_gap_max": "Maximum spacing before the attack candidate expires.",
@@ -272,6 +273,7 @@
       "duplicate_zone_name": "Another zone already uses this name. Zone names must be unique.",
       "invalid_room_name": "The room name must contain at least one letter or digit.",
       "invalid_zone_range": "The far edge must be greater than the near edge.",
+      "invalid_attack_gap": "Attack gap maximum must be greater than attack gap minimum.",
       "multiple_fallback_zones": "This sensor already has a fallback zone. At most one zone per sensor can be the fallback."
     },
     "abort": {
@@ -301,7 +303,21 @@
           "enabled": "Enabled",
           "disabled": "Disabled"
         }
+      },
+      "calibration_status": {
+        "state": {
+          "ready": "Ready",
+          "uncalibrated": "Uncalibrated",
+          "recalibration_required": "Recalibration required",
+          "calibrating": "Calibrating"
+        }
       }
+    }
+  },
+  "issues": {
+    "calibration_required": {
+      "title": "Presence calibration needs attention",
+      "description": "Presence Conductor is using safe fallback calibration for one or more zones.\n\n{details}\n\nKeep each affected zone empty and press its **Record baseline** button. The default recording time is 300 seconds."
     }
   },
   "services": {

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import random
+from dataclasses import replace
 from statistics import NormalDist
 
 import pytest
@@ -32,7 +33,9 @@ from custom_components.presence_conductor.core.model import (
 )
 from custom_components.presence_conductor.core.stats import (
     attack_threshold,
+    calibration_fingerprint,
     clipped_mean,
+    floor_calibration_fingerprint,
     onesided_max_stats,
 )
 
@@ -63,13 +66,13 @@ def _noisy_energy(rng: random.Random) -> float:
     return float(max(0, min(100, round(rng.gauss(NOISE_MU, NOISE_SIGMA)))))
 
 
-def _gate_zone_config(far_cm: float) -> ConductorConfig:
+def _gate_zone_config(far_cm: float, **tunable_overrides: float) -> ConductorConfig:
     """One sensor, one zone owning the gates that cover ``[0, far_cm]``."""
     return ConductorConfig(
         sensors=(SensorConfig(KONTOR, "Kontor"),),
         zones=(ZoneConfig("z", "Z", KONTOR, room_id="r", near_cm=0, far_cm=far_cm),),
         rooms=(RoomConfig("r", "R"),),
-        tunables=Tunables(use_gate_evidence=True),  # 2.6: gate tests opt in
+        tunables=Tunables(use_gate_evidence=True, **tunable_overrides),  # 2.6: gate tests opt in
     )
 
 
@@ -95,6 +98,8 @@ def test_calibrated_empty_gate_noise_never_occupies(far_cm: float) -> None:
     for _ in range(121):
         h.send_frame(
             KONTOR,
+            move_e=5.0,
+            still_e=5.0,
             gate_move=_noise_tuple(rng, owned),
             gate_still=_noise_tuple(rng, owned),
         )
@@ -108,6 +113,8 @@ def test_calibrated_empty_gate_noise_never_occupies(far_cm: float) -> None:
     for second in range(900):
         h.send_frame(
             KONTOR,
+            move_e=5.0,
+            still_e=5.0,
             gate_move=_noise_tuple(rng, owned),
             gate_still=_noise_tuple(rng, owned),
         )
@@ -135,6 +142,8 @@ def test_analytic_fallback_empty_gate_noise_never_occupies() -> None:
     for second in range(900):
         h.send_frame(
             KONTOR,
+            move_e=5.0,
+            still_e=5.0,
             gate_move=_noise_tuple(rng, owned),
             gate_still=_noise_tuple(rng, owned),
         )
@@ -183,6 +192,8 @@ def test_review_seeds_stay_empty_for_an_hour(seed: int, far_cm: float) -> None:
     for _ in range(121):
         h.send_frame(
             KONTOR,
+            move_e=5.0,
+            still_e=5.0,
             gate_move=_noise_tuple(rng, owned),
             gate_still=_noise_tuple(rng, owned),
         )
@@ -232,6 +243,8 @@ def test_round3_seeds_with_uncalibrated_scale_noise(
     for _ in range(121):
         h.send_frame(
             KONTOR,
+            move_e=5.0,
+            still_e=5.0,
             gate_move=_tuple_at(rng, owned, mu, sigma),
             gate_still=_tuple_at(rng, owned, mu, sigma),
         )
@@ -268,6 +281,8 @@ def test_calibration_cannot_manufacture_occupancy() -> None:
     for _ in range(121):
         h.send_frame(
             KONTOR,
+            move_e=5.0,
+            still_e=5.0,
             gate_move=_tuple_at(rng, owned, 20.0, 5.0),
             gate_still=_tuple_at(rng, owned, 20.0, 5.0),
         )
@@ -360,7 +375,7 @@ class TestRule38HeldAndCorrelatedNoise:
         h.submit(RecordBaseline("z", duration=120.0))
         for _ in range(121):
             m, st = draw()
-            h.send_frame(KONTOR, gate_move=m, gate_still=st)
+            h.send_frame(KONTOR, move_e=5.0, still_e=5.0, gate_move=m, gate_still=st)
             h.step_to(h.now + 1.0)
         if rho >= 0.9:
             # 3.7: the dependence was measured and discounts the rate.
@@ -403,7 +418,7 @@ class TestRule38HeldAndCorrelatedNoise:
         h.submit(RecordBaseline("z", duration=120.0))
         for _ in range(121):
             m, s = draw()
-            h.send_frame(KONTOR, gate_move=m, gate_still=s)
+            h.send_frame(KONTOR, move_e=5.0, still_e=5.0, gate_move=m, gate_still=s)
             h.step_to(h.now + 1.0)
         # 3.1 family-wise coverage: no gate floor underfits the true scale.
         assert min(f.sigma for f in zone.gate_move_baselines.values()) >= 0.05
@@ -439,7 +454,7 @@ class TestRule38HeldAndCorrelatedNoise:
         """Rule 4.2: per-gate entities update in a flurry from one radar
         frame; the spacing floor collapses the burst to one confirmation —
         nine fresh gate updates within milliseconds must not fire."""
-        config = _gate_zone_config(600.0)
+        config = _gate_zone_config(600.0, attack_gap_min=0.0)
         floors = {i: GateBaselines(0.20, 0.05, 0.20, 0.05) for i in range(9)}
         h = Harness(
             config,
@@ -459,6 +474,53 @@ class TestRule38HeldAndCorrelatedNoise:
         h.send_frame(KONTOR, gate_move=gate_tuple({2: 70.0}, fill=None), at=start + 0.4)
         assert zone.attack_count == 2
         assert zone.occupied
+
+    def test_attack_confirmation_cannot_cross_evidence_paths(self) -> None:
+        """A gate tail event and an aggregate tail event have different
+        calibrations and may not confirm one another."""
+        config = _gate_zone_config(40.0)
+        floors = {i: GateBaselines(0.20, 0.05, 0.20, 0.05) for i in range(9)}
+        h = Harness(
+            config,
+            InitialSnapshot(baselines={"z": ZoneBaselines(0.20, 0.05, 0.20, 0.05, gates=floors)}),
+        )
+        zone = h.zone("z")
+        zone.stat_cal["move_gate"] = StatBaseline(STAT_M0, STAT_S0, 0.0, tau=6.0)
+
+        h.send_frame(KONTOR, gate_move=gate_tuple({0: 60.0}, fill=None))
+        assert zone.attack_count == 1
+        assert zone.attack_path == "move_gate"
+        h.send_frame(
+            KONTOR,
+            move_d=100.0,
+            move_e=60.0,
+            moving=True,
+            gate_move=None,
+            at=h.now + 1.0,
+        )
+        assert zone.attack_count <= 1
+        assert zone.attack_path in (None, "move_agg")
+        assert not zone.occupied
+
+    def test_zero_configured_attack_gap_is_total_with_calibrated_tau(self) -> None:
+        """The options UI historically allowed zero; a tau-scaled chain
+        must remain safe and must not divide by zero."""
+        config = make_config(attack_gap_min=0.0)
+        h = Harness(config, make_snapshot(config))
+        zone = h.zone(DESK)
+        zone.stat_cal["move_agg"] = StatBaseline(STAT_M0, STAT_S0, 0.0, tau=6.0)
+        h.send_frame(KONTOR, move_d=100.0, move_e=35.0, moving=True)
+        h.send_frame(KONTOR, move_d=100.0, move_e=36.0, moving=True, at=h.now + 6.0)
+        assert zone.occupied
+
+    def test_legacy_inverted_attack_window_remains_usable(self) -> None:
+        config = make_config(attack_gap_min=5.0, attack_gap_max=0.5)
+        h = Harness(config, make_snapshot(config))
+        h.send_frame(KONTOR, move_d=100.0, move_e=35.0, moving=True)
+        # The defensive legacy window is wide enough for real 1-2 s radar
+        # cadence, rather than requiring an implausibly exact timestamp.
+        h.send_frame(KONTOR, move_d=100.0, move_e=36.0, moving=True, at=6.5)
+        assert h.zone(DESK).occupied
 
     def test_held_calibration_rows_do_not_overstate_confidence(self) -> None:
         """Rows without an observation-counter advance are excluded from
@@ -491,6 +553,8 @@ class TestRule37Shrinkage:
         for _ in range(121):
             h.send_frame(
                 KONTOR,
+                move_e=5.0,
+                still_e=5.0,
                 gate_move=gate_tuple(dict.fromkeys(owned, 5.0), fill=None),
                 gate_still=gate_tuple(dict.fromkeys(owned, 5.0), fill=None),
             )
@@ -512,6 +576,161 @@ class TestRule37Shrinkage:
         zone = h.zone("z")
         assert zone.gate_move_baselines == {}  # floors kept (3.3 coverage)
         assert zone.stat_cal == {}  # statistic kept too (3.7)
+
+
+class TestCalibrationCompatibility:
+    def test_current_sigma_floor_clamps_persisted_floors_and_invalidates_statistic(
+        self,
+    ) -> None:
+        old = _gate_zone_config(40.0, sigma_min=0.02)
+        owned = (0,)
+        persisted = ZoneBaselines(
+            0.05,
+            0.02,
+            0.05,
+            0.02,
+            gates={0: GateBaselines(0.05, 0.02, 0.05, 0.02)},
+            gate_indices=owned,
+            stats={
+                "move_gate": StatBaseline(
+                    0.4,
+                    0.6,
+                    fingerprint=calibration_fingerprint("move_gate", owned, old.tunables),
+                )
+            },
+        )
+        changed = _gate_zone_config(40.0, sigma_min=0.10)
+        h = Harness(changed, InitialSnapshot(baselines={"z": persisted}))
+        zone = h.zone("z")
+        assert zone.move_baseline.sigma == pytest.approx(0.10)
+        assert zone.still_baseline.sigma == pytest.approx(0.10)
+        assert zone.gate_move_baselines[0].sigma == pytest.approx(0.10)
+        assert zone.gate_still_baselines[0].sigma == pytest.approx(0.10)
+        assert "move_gate" not in zone.stat_cal
+
+    def test_current_energy_quantum_guards_legacy_floor(self) -> None:
+        old = make_config(energy_quantum=0.01)
+        fingerprint = calibration_fingerprint("move_agg", (), old.tunables)
+        persisted = ZoneBaselines(
+            0.05,
+            0.02,
+            0.05,
+            0.02,
+            stats={"move_agg": StatBaseline(0.4, 0.6, fingerprint=fingerprint)},
+        )
+        changed = make_config(energy_quantum=0.10)
+        h = Harness(changed, InitialSnapshot(baselines={DESK: persisted}))
+        floor = h.zone(DESK).move_baseline
+        assert floor.sigma == pytest.approx(evidence.MAD_TO_SIGMA * 0.10 / 2.0)
+        assert "move_agg" not in h.zone(DESK).stat_cal
+
+        # One reporting quantum cannot masquerade as a nominal 1e-4 tail.
+        h.send_frame(KONTOR, move_d=100.0, move_e=15.0, moving=True)
+        assert h.zone(DESK).attack_count == 0
+
+    def test_energy_quantum_guards_uncalibrated_default_floor(self) -> None:
+        config = make_config(default_mu=0.10, default_sigma=0.001, energy_quantum=0.10)
+        h = Harness(config, InitialSnapshot())
+        floor = h.zone(DESK).move_baseline
+        assert floor.sigma == pytest.approx(evidence.MAD_TO_SIGMA * 0.10 / 2.0)
+
+        h.send_frame(KONTOR, move_d=100.0, move_e=20.0, moving=True)
+        assert h.zone(DESK).attack_count == 0
+
+    def test_changed_floor_fit_settings_invalidate_bound_calibration(self) -> None:
+        old = make_config(energy_quantum=0.01)
+        persisted = ZoneBaselines(
+            0.40,
+            0.03,
+            0.50,
+            0.04,
+            sensor_id=KONTOR,
+            floor_fingerprint=floor_calibration_fingerprint(old.tunables),
+        )
+        changed = make_config(energy_quantum=0.10)
+        h = Harness(changed, InitialSnapshot(baselines={DESK: persisted}))
+
+        assert h.zone(DESK).move_baseline.mu == pytest.approx(changed.tunables.default_mu)
+        assert h.zone(DESK).still_baseline.mu == pytest.approx(changed.tunables.default_mu)
+
+    def test_sensor_reassignment_invalidates_persisted_calibration(self) -> None:
+        config = make_config()
+        persisted = ZoneBaselines(
+            0.40,
+            0.03,
+            0.50,
+            0.04,
+            sensor_id="different_sensor",
+        )
+        h = Harness(config, InitialSnapshot(baselines={DESK: persisted}))
+        assert h.zone(DESK).move_baseline.mu == pytest.approx(config.tunables.default_mu)
+
+    def test_gate_ownership_change_invalidates_floors_and_statistic(self) -> None:
+        old = _gate_zone_config(40.0)
+        old_owned = (0,)
+        fingerprint = calibration_fingerprint("move_gate", old_owned, old.tunables)
+        persisted = ZoneBaselines(
+            0.05,
+            0.05,
+            0.05,
+            0.05,
+            gates={0: GateBaselines(0.05, 0.05, 0.05, 0.05)},
+            gate_indices=old_owned,
+            stats={"move_gate": StatBaseline(0.4, 0.6, fingerprint=fingerprint)},
+        )
+
+        expanded = _gate_zone_config(600.0)
+        h = Harness(expanded, InitialSnapshot(baselines={"z": persisted}))
+        zone = h.zone("z")
+        assert not zone.gate_move_ready
+        assert "move_gate" not in zone.stat_cal
+        h.send_frame(KONTOR, move_e=5.0, gate_move=gate_tuple({0: 60.0}, fill=5.0))
+        assert not zone.move_from_gates
+
+    def test_gate_resolution_change_invalidates_same_index_family(self) -> None:
+        old = _gate_zone_config(40.0)
+        owned = (0,)
+        persisted = ZoneBaselines(
+            0.05,
+            0.05,
+            0.05,
+            0.05,
+            gates={0: GateBaselines(0.05, 0.05, 0.05, 0.05)},
+            gate_indices=owned,
+            sensor_id=KONTOR,
+            gate_size_cm=75.0,
+            stats={
+                "move_gate": StatBaseline(
+                    0.4,
+                    0.6,
+                    fingerprint=calibration_fingerprint("move_gate", owned, old.tunables),
+                )
+            },
+        )
+        # Both resolutions still assign gate 0, but it spans a different
+        # physical region and its learned floor/statistic are incompatible.
+        changed = replace(old, sensors=(SensorConfig(KONTOR, "Kontor", gate_size_cm=100.0),))
+        h = Harness(changed, InitialSnapshot(baselines={"z": persisted}))
+        zone = h.zone("z")
+        assert not zone.gate_move_ready
+        assert zone.gate_move_baselines == {}
+        assert "move_gate" not in zone.stat_cal
+
+    def test_score_transform_change_invalidates_statistic(self) -> None:
+        old = make_config(z_cap=6.0)
+        # Aggregate fingerprints ignore the owned set; pass an empty tuple
+        # explicitly to make that contract visible.
+        fingerprint = calibration_fingerprint("move_agg", (), old.tunables)
+        persisted = ZoneBaselines(
+            0.05,
+            0.05,
+            0.05,
+            0.05,
+            stats={"move_agg": StatBaseline(0.4, 0.6, fingerprint=fingerprint)},
+        )
+        changed = make_config(z_cap=7.0)
+        h = Harness(changed, InitialSnapshot(baselines={DESK: persisted}))
+        assert "move_agg" not in h.zone(DESK).stat_cal
 
 
 class TestRule42AttackTail:

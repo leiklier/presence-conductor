@@ -87,7 +87,7 @@ _TUNABLE_UI: dict[str, tuple[float, float, float, str | None]] = {
     "p_prior": (0.001, 0.5, 0.001, None),
     "attack_tail_ppm": (1, 10000, 1, "ppm"),
     "attack_confirm": (1, 5, 1, None),
-    "attack_gap_min": (0, 5, 0.1, "s"),
+    "attack_gap_min": (0.1, 5, 0.1, "s"),
     "attack_gap_max": (0.5, 10, 0.1, "s"),
     "p_attack": (0.5, 0.999, 0.001, None),
     "theta_on": (0.5, 0.999, 0.01, None),
@@ -708,7 +708,12 @@ class PresenceConductorOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         """Every Tunables field, seeded from storage (defaults otherwise)."""
         if user_input is not None:
-            return self._save({CONF_TUNABLES: _tunables_from_input(user_input)})
+            if user_input["attack_gap_max"] > user_input["attack_gap_min"]:
+                return self._save({CONF_TUNABLES: _tunables_from_input(user_input)})
+            schema = self.add_suggested_values_to_schema(_tunables_schema(), user_input)
+            return self.async_show_form(
+                step_id="tunables", data_schema=schema, errors={"base": "invalid_attack_gap"}
+            )
         stored = self.config_entry.options.get(CONF_TUNABLES, {})
         schema = self.add_suggested_values_to_schema(_tunables_schema(), stored)
         return self.async_show_form(step_id="tunables", data_schema=schema)

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from homeassistant.core import HomeAssistant, State
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
@@ -13,9 +17,11 @@ from pytest_homeassistant_custom_component.common import (
 )
 
 from custom_components.presence_conductor.const import DOMAIN
+from custom_components.presence_conductor.controller import CALIBRATION_ISSUE_ID_PREFIX
 from custom_components.presence_conductor.core.events import RecordBaseline, SetEnabled
-from custom_components.presence_conductor.core.model import Activity, Health
-from tests.test_controller import setup_conductor
+from custom_components.presence_conductor.core.model import Activity, Health, Tunables
+from custom_components.presence_conductor.core.stats import floor_calibration_fingerprint
+from tests.test_controller import KONTOR, OPTIONS, SOFAKROK, setup_conductor
 
 
 def entity_id_for(hass: HomeAssistant, platform: str, unique_id: str) -> str:
@@ -148,6 +154,7 @@ async def test_diagnostic_and_config_entity_categories(hass: HomeAssistant, monk
         return registry.async_get(entity_id_for(hass, platform, unique_id)).entity_category
 
     assert category("sensor", f"{entry.entry_id}_zone_sofakrok_confidence") == diagnostic
+    assert category("sensor", f"{entry.entry_id}_zone_sofakrok_calibration_status") == diagnostic
     assert category("sensor", f"{entry.entry_id}_zone_sofakrok_dwell") == diagnostic
     assert category("sensor", f"{entry.entry_id}_room_stue_confidence") == diagnostic
     assert category("sensor", f"{entry.entry_id}_home_confidence") == diagnostic
@@ -160,6 +167,211 @@ async def test_diagnostic_and_config_entity_categories(hass: HomeAssistant, monk
     # Primary outputs stay uncategorized.
     assert category("binary_sensor", f"{entry.entry_id}_zone_sofakrok_occupancy") is None
     assert category("sensor", f"{entry.entry_id}_zone_sofakrok_activity") is None
+
+
+async def test_calibration_status_and_repairs_surface_startup_fallbacks(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    entry, _controller, _fake = await setup_conductor(hass, monkeypatch)
+    calibration = entity_id_for(
+        hass, "sensor", f"{entry.entry_id}_zone_sofakrok_calibration_status"
+    )
+    state = hass.states.get(calibration)
+    assert state.state == "recalibration_required"
+    assert state.attributes["reason_codes"] == ["legacy_context"]
+    assert state.attributes["floor_source"] == "recorded"
+    assert state.attributes["move_statistic"] == "analytic"
+    assert state.attributes["move_runtime"] == "aggregate"
+    assert "record a new baseline" in state.attributes["action"]
+
+    uncalibrated = entity_id_for(
+        hass, "sensor", f"{entry.entry_id}_zone_kontor_pult_calibration_status"
+    )
+    assert hass.states.get(uncalibrated).state == "uncalibrated"
+    issue = ir.async_get(hass).async_get_issue(
+        DOMAIN, f"{CALIBRATION_ISSUE_ID_PREFIX}_{entry.entry_id}"
+    )
+    assert issue is not None
+    assert issue.severity is ir.IssueSeverity.WARNING
+    assert issue.is_fixable is False
+    assert issue.is_persistent is False
+    assert issue.translation_key == "calibration_required"
+    assert "Sofakrok" in issue.translation_placeholders["details"]
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert (
+        ir.async_get(hass).async_get_issue(
+            DOMAIN, f"{CALIBRATION_ISSUE_ID_PREFIX}_{entry.entry_id}"
+        )
+        is None
+    )
+
+
+async def test_compatible_calibration_has_no_repairs_issue(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    options = deepcopy(OPTIONS)
+    options["baselines"] = {
+        zone["zone_id"]: {
+            "move_mu": 0.02,
+            "move_sigma": 0.02,
+            "still_mu": 0.02,
+            "still_sigma": 0.02,
+            "sensor_id": zone["sensor"],
+            "floor_fingerprint": floor_calibration_fingerprint(Tunables()),
+            "gate_size_cm": 75.0,
+        }
+        for zone in options["zones"]
+    }
+    entry, _controller, _fake = await setup_conductor(hass, monkeypatch, options=options)
+    for zone_id in ("kontor_pult", "kontor_dor", "sofakrok"):
+        calibration = entity_id_for(
+            hass, "sensor", f"{entry.entry_id}_zone_{zone_id}_calibration_status"
+        )
+        assert hass.states.get(calibration).state == "ready"
+    assert (
+        ir.async_get(hass).async_get_issue(
+            DOMAIN, f"{CALIBRATION_ISSUE_ID_PREFIX}_{entry.entry_id}"
+        )
+        is None
+    )
+
+
+async def test_enabled_gate_path_without_gate_calibration_is_visible(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    options = deepcopy(OPTIONS)
+    options["tunables"] = {"use_gate_evidence": True}
+    options["sensors"][0]["entities"]["g0_move"] = "sensor.kontor_g0_move"
+    options["baselines"] = {
+        "kontor_pult": {
+            "move_mu": 0.02,
+            "move_sigma": 0.02,
+            "still_mu": 0.02,
+            "still_sigma": 0.02,
+            "sensor_id": KONTOR,
+            "floor_fingerprint": floor_calibration_fingerprint(Tunables()),
+            "gate_size_cm": 100.0,
+        },
+        "kontor_dor": {
+            "move_mu": 0.02,
+            "move_sigma": 0.02,
+            "still_mu": 0.02,
+            "still_sigma": 0.02,
+            "sensor_id": KONTOR,
+            "floor_fingerprint": floor_calibration_fingerprint(Tunables()),
+            "gate_size_cm": 75.0,
+        },
+        "sofakrok": {
+            "move_mu": 0.02,
+            "move_sigma": 0.02,
+            "still_mu": 0.02,
+            "still_sigma": 0.02,
+            "sensor_id": SOFAKROK,
+            "floor_fingerprint": floor_calibration_fingerprint(Tunables()),
+            "gate_size_cm": 75.0,
+        },
+    }
+    entry, _controller, _fake = await setup_conductor(hass, monkeypatch, options=options)
+    calibration = entity_id_for(
+        hass, "sensor", f"{entry.entry_id}_zone_kontor_pult_calibration_status"
+    )
+    state = hass.states.get(calibration)
+    assert state.state == "recalibration_required"
+    assert "gate_move_calibration_missing" in state.attributes["reason_codes"]
+    assert "gate_resolution_changed" in state.attributes["reason_codes"]
+    assert "Gate resolution changed from 100 cm to 75 cm." in state.attributes["reasons"]
+    assert state.attributes["move_runtime"] == "aggregate"
+
+
+async def test_changed_floor_fit_settings_require_recalibration(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    options = deepcopy(OPTIONS)
+    options["tunables"] = {"energy_quantum": 0.10}
+    options["baselines"] = {
+        "sofakrok": {
+            "move_mu": 0.02,
+            "move_sigma": 0.02,
+            "still_mu": 0.02,
+            "still_sigma": 0.02,
+            "sensor_id": SOFAKROK,
+            "floor_fingerprint": floor_calibration_fingerprint(Tunables()),
+        }
+    }
+    entry, _controller, _fake = await setup_conductor(hass, monkeypatch, options=options)
+    calibration = entity_id_for(
+        hass, "sensor", f"{entry.entry_id}_zone_sofakrok_calibration_status"
+    )
+    state = hass.states.get(calibration)
+    assert state.state == "recalibration_required"
+    assert state.attributes["reason_codes"] == ["floor_settings_changed"]
+    assert state.attributes["floor_source"] == "default"
+
+
+async def test_runtime_source_tracks_gate_dropout_and_recovery(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    entry, controller, _fake = await setup_conductor(hass, monkeypatch)
+    zone = controller.engine.state.zones["sofakrok"]
+    calibration = entity_id_for(
+        hass, "sensor", f"{entry.entry_id}_zone_sofakrok_calibration_status"
+    )
+
+    zone.move_from_gates = True
+    async_dispatcher_send(hass, controller.signal_control)
+    await hass.async_block_till_done()
+    assert hass.states.get(calibration).attributes["move_runtime"] == "gate"
+
+    zone.move_from_gates = False
+    async_dispatcher_send(hass, controller.signal_control)
+    await hass.async_block_till_done()
+    assert hass.states.get(calibration).attributes["move_runtime"] == "aggregate"
+
+
+async def test_failed_unload_keeps_repairs_warning(hass: HomeAssistant, monkeypatch) -> None:
+    import custom_components.presence_conductor as integration
+
+    entry, _controller, _fake = await setup_conductor(hass, monkeypatch)
+    issue_id = f"{CALIBRATION_ISSUE_ID_PREFIX}_{entry.entry_id}"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+    with patch.object(hass.config_entries, "async_unload_platforms", AsyncMock(return_value=False)):
+        assert await integration.async_unload_entry(hass, entry) is False
+
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+    assert hass.data[DOMAIN][entry.entry_id] is not None
+
+
+async def test_incompatible_statistic_reports_analytic_fallback(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    options = deepcopy(OPTIONS)
+    options["baselines"] = {
+        zone["zone_id"]: {
+            "move_mu": 0.02,
+            "move_sigma": 0.02,
+            "still_mu": 0.02,
+            "still_sigma": 0.02,
+            "sensor_id": zone["sensor"],
+            "floor_fingerprint": floor_calibration_fingerprint(Tunables()),
+            "gate_size_cm": 75.0,
+        }
+        for zone in options["zones"]
+    }
+    options["baselines"]["sofakrok"]["stats"] = {
+        "move_agg": {"mu": 0.4, "sigma": 0.6, "fingerprint": "old-transform"}
+    }
+    entry, _controller, _fake = await setup_conductor(hass, monkeypatch, options=options)
+    calibration = entity_id_for(
+        hass, "sensor", f"{entry.entry_id}_zone_sofakrok_calibration_status"
+    )
+    state = hass.states.get(calibration)
+    assert state.state == "recalibration_required"
+    assert state.attributes["reason_codes"] == ["statistic_context_changed"]
+    assert state.attributes["move_statistic"] == "analytic"
+    assert state.attributes["move_runtime"] == "aggregate"
 
 
 # ---------------------------------------------------------------------------
@@ -409,12 +621,12 @@ async def test_entity_inventory_spans_hub_and_room_devices(
     entry, _controller, _fake = await setup_conductor(hass, monkeypatch)
     registry = er.async_get(hass)
     entries = er.async_entries_for_config_entry(registry, entry.entry_id)
-    # 3 zones x (occupancy, motion, activity, confidence, dwell, pass-by,
-    # calibration outcome, record baseline) + 2 rooms x (occupancy, motion,
+    # 3 zones x (occupancy, motion, activity, confidence, dwell, calibration
+    # status, pass-by, calibration outcome, record baseline) + 2 rooms x (occupancy, motion,
     # settled, activity, confidence, pass-by) + anyone_home + home
     # confidence + enabled + state. Disabled-by-default zone entities are
     # registered like the rest.
-    assert len(entries) == 3 * 8 + 2 * 6 + 4
+    assert len(entries) == 3 * 9 + 2 * 6 + 4
     # Hub + one device per room; the layout itself is tests/test_devices.py.
     assert len({e.device_id for e in entries}) == 3
 

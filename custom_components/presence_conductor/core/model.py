@@ -150,10 +150,9 @@ class Tunables:
     tau_decay: float = 90.0
     #: Empty-state prior confidence (rule 4.1).
     p_prior: float = 0.02
-    #: Fast-attack tail probability (parts per million), confirmation and
-    #: floor (rule 4.2). Candidacy thresholds on the analytic tail of the
-    #: raw statistic — per-observation ``P_H0(S >= threshold) =
-    #: attack_tail_ppm * 1e-6`` — never on a window-estimated tail.
+    #: Nominal fast-attack Gaussian tail (parts per million), confirmation
+    #: and floor (rule 4.2). The equality is exact only under the analytic
+    #: iid Gaussian empty model, never claimed from a short calibration.
     attack_tail_ppm: float = 100.0
     attack_confirm: int = 2
     attack_gap_min: float = 0.3
@@ -245,6 +244,13 @@ class BaselineRow:
     #: measurement and are excluded from the statistics.
     move_fresh: bool = True
     still_fresh: bool = True
+    #: Whether any supported entity from this sensor was observed since
+    #: the previous tick-aligned row. Unlike the row itself, this proves
+    #: that the cached plateau was re-observed rather than merely held.
+    frame_fresh: bool = True
+    #: Monotonic tick time of this row. Dependence is estimated in
+    #: observation indices, while attack spacing needs physical seconds.
+    observed_at: float = 0.0
 
 
 #: Calibration coverage statuses (rule 3.3).
@@ -255,11 +261,12 @@ class Coverage(StrEnum):
     #: statistic: the path's calibration is in the committed candidate.
     CALIBRATED = "calibrated"
     #: The channel's values span at most one quantum: the empty signal
-    #: never moves. Floor ``(median, sigma_min)``, analytic statistic.
+    #: never moves over enough certified sensor observations. Floor
+    #: ``(median, sigma_min)``, analytic statistic.
     QUIESCENT = "quiescent"
     #: The channel never reported during the window: nothing to calibrate,
-    #: previous values kept. Never blocks the commit (a test rig or an
-    #: unconfigured path, not a coverage failure).
+    #: previous values kept. Optional paths preserve their old family;
+    #: required paths cannot commit with no data.
     NO_DATA = "no_data"
     #: Data present but too few fresh/distinct observations: blocks the
     #: whole commit when the path is required.
@@ -280,6 +287,9 @@ class ChannelCoverage:
     distinct: int
     #: Human-readable rejection reason; ``None`` unless REJECTED.
     reason: str | None = None
+    #: Tick rows certified by at least one real sensor-frame observation
+    #: during the row interval (3.3). Ticks alone never increment this.
+    observed: int = 0
 
 
 @dataclass(slots=True)
@@ -294,8 +304,10 @@ class BaselineRecording:
 
     rows: list[BaselineRow] = field(default_factory=list)
     #: Observation counters at the previous row, for freshness tagging.
-    last_move_obs: int | None = None
-    last_still_obs: int | None = None
+    last_move_obs: int = 0
+    last_still_obs: int = 0
+    last_frame_obs: int = 0
+    started_at: float = 0.0
 
 
 @dataclass(slots=True)
@@ -320,6 +332,10 @@ class ZoneState:
     #: ``Tunables`` defaults and zones that never see gate data stay empty.
     gate_move_baselines: dict[int, ChannelStats] = field(default_factory=dict)
     gate_still_baselines: dict[int, ChannelStats] = field(default_factory=dict)
+    #: Complete, context-valid gate families. Background adaptation may
+    #: populate provisional floors but never makes a path runtime-ready.
+    gate_move_ready: bool = False
+    gate_still_ready: bool = False
     #: Statistic calibration (rule 3.7): empty-room ``(m0, s0, c0)`` of the
     #: raw statistic per channel + path, keyed ``move_agg`` / ``move_gate``
     #: / ``still_agg`` / ``still_gate``. A missing key means the analytic
@@ -352,6 +368,9 @@ class ZoneState:
     #: observations counted so far, and when the last one arrived.
     attack_count: int = 0
     attack_last: float | None = None
+    #: Evidence path that started the current confirmation chain. Gate and
+    #: aggregate tail events may not confirm one another (rule 4.2).
+    attack_path: str | None = None
     # -- activity FSM internals (rule 5) --------------------------------
     occupied_since: float | None = None
     peak_confidence: float = 0.0
@@ -391,6 +410,7 @@ class SensorState:
     #: move-energy freshness flag (4.2).
     move_obs: int = 0
     still_obs: int = 0
+    frame_obs: int = 0
     move_energy_obs: int = 0
     move_obs_at: float | None = None
     still_obs_at: float | None = None
@@ -435,6 +455,10 @@ class GateBaselines:
     move_sigma: float
     still_mu: float
     still_sigma: float
+    #: Channel-presence flags preserve optional gate-family atomicity
+    #: across serialization. Legacy records omit them and mean both.
+    has_move: bool = True
+    has_still: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -449,6 +473,12 @@ class StatBaseline:
     #: Estimated integrated autocorrelation time of the calibrated empty
     #: process (rule 3.7); runtime scores divide by it (3.2).
     tau: float = 1.0
+    #: Physical decorrelation time used only by fast-attack spacing. None
+    #: keeps programmatic/core snapshots backward compatible by using tau.
+    decorrelation_seconds: float | None = None
+    #: Calibration-context fingerprint. None is trusted for programmatic
+    #: snapshots; persisted legacy records parse as an invalid empty value.
+    fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,6 +497,18 @@ class ZoneBaselines:
     #: ``move_gate`` / ``still_agg`` / ``still_gate``. Missing keys (and
     #: pre-3.7 baselines) fall back to the analytic values.
     stats: Mapping[str, StatBaseline] = field(default_factory=dict)
+    #: Exact zone-owned gate set when the gate families were persisted.
+    #: Missing legacy metadata invalidates gate calibration on load.
+    gate_indices: tuple[int, ...] | None = None
+    #: Sensor identity that produced the calibration. Legacy/programmatic
+    #: records omit it for backward compatibility; new writes are bound.
+    sensor_id: str | None = None
+    #: Empty-channel floor-fit settings. Unlike statistic fingerprints this
+    #: is always written, including for a quiescent calibration window.
+    floor_fingerprint: str | None = None
+    #: Gate resolution that produced a persisted gate family. Aggregate
+    #: floors do not depend on it; a mismatch invalidates gate paths only.
+    gate_size_cm: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
