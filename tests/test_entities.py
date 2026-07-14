@@ -16,8 +16,8 @@ from pytest_homeassistant_custom_component.common import (
     mock_restore_cache,
 )
 
+from custom_components.presence_conductor.calibration import CALIBRATION_ISSUE_ID_PREFIX
 from custom_components.presence_conductor.const import DOMAIN
-from custom_components.presence_conductor.controller import CALIBRATION_ISSUE_ID_PREFIX
 from custom_components.presence_conductor.core.events import RecordBaseline, SetEnabled
 from custom_components.presence_conductor.core.model import Activity, Health, Tunables
 from custom_components.presence_conductor.core.stats import floor_calibration_fingerprint

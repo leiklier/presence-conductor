@@ -21,14 +21,11 @@ from homeassistant.helpers import device_registry as dr
 
 from .config import build_config
 from .const import CONF_BASELINES, CONF_SENSORS, DOMAIN
-from .controller import (
-    PresenceConductorController,
-    build_initial_snapshot,
-    conductor_device_info,
-    room_device_info,
-)
+from .controller import PresenceConductorController
 from .core.engine import ConductorEngine
 from .core.events import RecordBaseline
+from .entity import conductor_device_info, room_device_info
+from .observation import build_initial_snapshot
 
 _LOGGER = logging.getLogger(__name__)
 

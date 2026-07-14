@@ -24,10 +24,12 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from .calibration import baseline_payload
 from .const import DOMAIN
-from .controller import ConductorEntity, PresenceConductorController, _baseline_payload
+from .controller import PresenceConductorController
 from .core.model import ZoneConfig
 from .core.plan import BaselineRecorded, PassBy
+from .entity import ConductorEntity
 
 EVENT_TYPE_PASS_BY = "pass_by"
 EVENT_TYPE_BASELINE_RECORDED = "recorded"
@@ -125,7 +127,7 @@ class ZoneBaselineEvent(ConductorEntity, EventEntity):
 
     @callback
     def _on_baseline(self, event: BaselineRecorded) -> None:
-        payload = _baseline_payload(event)
+        payload = baseline_payload(event)
         payload.pop("zone_id")  # the entity IS the zone
         self._trigger_event(
             EVENT_TYPE_BASELINE_RECORDED if event.success else EVENT_TYPE_BASELINE_REJECTED,
