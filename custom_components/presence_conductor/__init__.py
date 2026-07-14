@@ -23,7 +23,12 @@ from .config import build_config
 from .const import CONF_BASELINES, CONF_SENSORS, DOMAIN
 from .controller import PresenceConductorController
 from .core.engine import ConductorEngine
-from .core.events import RecordBaseline
+from .core.events import (
+    AdvanceFullCalibration,
+    CancelCalibration,
+    RecordBaseline,
+    StartFullCalibration,
+)
 from .entity import conductor_device_info, room_device_info
 from .observation import build_initial_snapshot
 
@@ -41,6 +46,15 @@ PLATFORMS: list[Platform] = [
 DATA_RELOAD_BASELINE = f"{DOMAIN}_reload_baseline"
 
 SERVICE_RECORD_BASELINE = "record_baseline"
+SERVICE_START_FULL_CALIBRATION = "start_full_calibration"
+SERVICE_ADVANCE_FULL_CALIBRATION = "advance_full_calibration"
+SERVICE_CANCEL_CALIBRATION = "cancel_calibration"
+CALIBRATION_SERVICES = (
+    SERVICE_RECORD_BASELINE,
+    SERVICE_START_FULL_CALIBRATION,
+    SERVICE_ADVANCE_FULL_CALIBRATION,
+    SERVICE_CANCEL_CALIBRATION,
+)
 ATTR_ZONE_ID = "zone_id"
 ATTR_DURATION = "duration"
 
@@ -127,31 +141,88 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
         hass.data.get(DATA_RELOAD_BASELINE, {}).pop(entry.entry_id, None)
         if not hass.data.get(DOMAIN):
-            hass.services.async_remove(DOMAIN, SERVICE_RECORD_BASELINE)
+            for service in CALIBRATION_SERVICES:
+                hass.services.async_remove(DOMAIN, service)
     return unload_ok
 
 
 @callback
 def _async_register_services(hass: HomeAssistant) -> None:
-    """Register the ``record_baseline`` service (rule 3.3) once."""
+    """Register expert calibration services once."""
     if hass.services.has_service(DOMAIN, SERVICE_RECORD_BASELINE):
         return
 
     @callback
-    def _handle_record_baseline(call: ServiceCall) -> None:
+    def controller_for(call: ServiceCall) -> PresenceConductorController:
         zone_id: str = call.data[ATTR_ZONE_ID]
-        duration: float | None = call.data.get(ATTR_DURATION)
         for controller in hass.data.get(DOMAIN, {}).values():
             if controller is not None and controller.config.zone_or_none(zone_id) is not None:
-                controller.submit(RecordBaseline(zone_id, duration))
-                return
+                return controller
         raise ServiceValidationError(
             f"Unknown zone '{zone_id}'. Use the zone's ID: the slug of its zone name."
         )
+
+    @callback
+    def require_ready_sensor(controller: PresenceConductorController, zone_id: str) -> None:
+        zone = controller.config.zone(zone_id)
+        if not controller.state.sensors[zone.sensor_id].available:
+            raise ServiceValidationError(f"Sensor for zone '{zone_id}' is unavailable.")
+        for sibling in controller.config.zones_for_sensor(zone.sensor_id):
+            state = controller.state.zones[sibling.zone_id]
+            if state.recording is not None or state.guided_calibration is not None:
+                raise ServiceValidationError(
+                    f"A calibration is already active on sensor '{zone.sensor_id}'."
+                )
+
+    @callback
+    def _handle_record_baseline(call: ServiceCall) -> None:
+        controller = controller_for(call)
+        require_ready_sensor(controller, call.data[ATTR_ZONE_ID])
+        controller.submit(RecordBaseline(call.data[ATTR_ZONE_ID], call.data.get(ATTR_DURATION)))
+
+    @callback
+    def _handle_start_full(call: ServiceCall) -> None:
+        controller = controller_for(call)
+        require_ready_sensor(controller, call.data[ATTR_ZONE_ID])
+        controller.submit(
+            StartFullCalibration(call.data[ATTR_ZONE_ID], call.data.get(ATTR_DURATION))
+        )
+
+    @callback
+    def _handle_advance_full(call: ServiceCall) -> None:
+        controller = controller_for(call)
+        state = controller.state.zones[call.data[ATTR_ZONE_ID]]
+        if state.guided_calibration is None or state.guided_calibration.status != "waiting":
+            raise ServiceValidationError("The full calibration is not waiting for a phase.")
+        controller.submit(
+            AdvanceFullCalibration(call.data[ATTR_ZONE_ID], call.data.get(ATTR_DURATION))
+        )
+
+    @callback
+    def _handle_cancel(call: ServiceCall) -> None:
+        controller_for(call).submit(CancelCalibration(call.data[ATTR_ZONE_ID]))
 
     hass.services.async_register(
         DOMAIN,
         SERVICE_RECORD_BASELINE,
         _handle_record_baseline,
         schema=SERVICE_RECORD_BASELINE_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_START_FULL_CALIBRATION,
+        _handle_start_full,
+        schema=SERVICE_RECORD_BASELINE_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_ADVANCE_FULL_CALIBRATION,
+        _handle_advance_full,
+        schema=SERVICE_RECORD_BASELINE_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_CANCEL_CALIBRATION,
+        _handle_cancel,
+        schema=vol.Schema({vol.Required(ATTR_ZONE_ID): cv.string}),
     )

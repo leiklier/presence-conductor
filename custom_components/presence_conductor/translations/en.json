@@ -64,6 +64,16 @@
       "overlap": {
         "title": "Overlapping zones",
         "description": "Zones of different sensors overlap within the same room:\n\n{overlaps}\n\nSame-room separation relies on non-overlapping distance intervals — overlap means both sensors will claim the same target. This is a warning, not an error: submit to keep the configuration anyway, or adjust it later via Configure."
+      },
+      "calibration_mode": {
+        "title": "Choose calibration",
+        "description": "Choose how you want to calibrate Presence Conductor. Simple empty-room calibration is the recommended starting point. Full calibration adds guided occupied-room capture and validation when available. This choice does not start recording, and you can change it later under Configure.",
+        "data": {
+          "calibration_mode": "Calibration mode"
+        },
+        "data_description": {
+          "calibration_mode": "Skip suppresses prompts while preserving compatible saved calibration; Simple records an empty-room baseline; Full opts into the complete guided workflow."
+        }
       }
     },
     "error": {
@@ -89,7 +99,18 @@
         "menu_options": {
           "sensors": "Sensors — add or remove mmWave devices",
           "zones": "Zones — rooms, distance slices, fallback",
+          "calibration": "Calibration — choose skip, simple, or full",
           "tunables": "Tunables — evidence weights, thresholds, timings"
+        }
+      },
+      "calibration": {
+        "title": "Calibration",
+        "description": "Choose the calibration workflow. Changing this setting preserves every recorded baseline and does not start a capture.",
+        "data": {
+          "calibration_mode": "Calibration mode"
+        },
+        "data_description": {
+          "calibration_mode": "Simple is the backward-compatible default. You can return here later to upgrade to Full or explicitly skip calibration."
         }
       },
       "sensors": {
@@ -309,15 +330,26 @@
           "ready": "Ready",
           "uncalibrated": "Uncalibrated",
           "recalibration_required": "Recalibration required",
-          "calibrating": "Calibrating"
+          "calibrating": "Calibrating",
+          "skipped": "Skipped",
+          "partial": "Empty baseline ready"
         }
+      }
+    }
+  },
+  "selector": {
+    "calibration_mode": {
+      "options": {
+        "simple": "Simple empty-room calibration (recommended)",
+        "full": "Full guided calibration",
+        "skip": "Skip calibration"
       }
     }
   },
   "issues": {
     "calibration_required": {
       "title": "Presence calibration needs attention",
-      "description": "Presence Conductor is using safe fallback calibration for one or more zones.\n\n{details}\n\nKeep each affected zone empty and press its **Record baseline** button. The default recording time is 300 seconds."
+      "description": "Presence Conductor is using safe fallback calibration for one or more zones.\n\n{details}\n\nFor Simple mode, keep the sensor's whole field of view empty and press **Record baseline**. For Full mode, press **Start full calibration** and follow the phase shown by the calibration-status sensor."
     }
   },
   "services": {
@@ -333,6 +365,29 @@
           "name": "Duration",
           "description": "Collection window in seconds. Defaults to the 'Baseline duration' tunable (300 s). The outcome — committed or rejected with per-channel coverage — fires as the zone's calibration event entity and the presence_conductor_baseline_recorded bus event."
         }
+      }
+    },
+    "start_full_calibration": {
+      "name": "Start full calibration",
+      "description": "Starts the guided full workflow with an empty-room baseline. The sensor's whole field of view must be empty.",
+      "fields": {
+        "zone_id": {"name": "Zone", "description": "Internal zone ID."},
+        "duration": {"name": "Baseline duration", "description": "Optional empty-baseline duration in seconds."}
+      }
+    },
+    "advance_full_calibration": {
+      "name": "Record next full-calibration phase",
+      "description": "Records the next labeled phase shown by the zone's calibration-status sensor.",
+      "fields": {
+        "zone_id": {"name": "Zone", "description": "Internal zone ID."},
+        "duration": {"name": "Phase duration", "description": "Optional phase duration in seconds; defaults to 60."}
+      }
+    },
+    "cancel_calibration": {
+      "name": "Cancel calibration",
+      "description": "Cancels an active empty or full calibration without replacing previously committed data.",
+      "fields": {
+        "zone_id": {"name": "Zone", "description": "Internal zone ID."}
       }
     }
   }

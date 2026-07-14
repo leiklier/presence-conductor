@@ -37,8 +37,9 @@ publishing signals automations can actually use:
   floors (a fan ghosting at one distance gets its own floor instead of
   polluting the zone), falling back to the aggregate path per frame whenever
   the gate stream drops
-- **guided calibration** — record an empty-room baseline per zone instead of
-  hand tuning 18 gate thresholds
+- **three calibration levels** — Skip, a recommended empty-room baseline, or
+  Full training across walking/standing/seated behavior with an independent
+  second-pass confusion matrix before the learned model activates
 
 Status: deployed in production. The architecture decision is documented in
 [docs/DECISION.md](docs/DECISION.md). The documentation map starts at

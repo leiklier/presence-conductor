@@ -20,11 +20,17 @@ from .const import (
     CONF_TUNABLES,
     CONF_ZONES,
 )
+from .core import emissions
 from .core.model import (
     DEFAULT_GATE_SIZE_CM,
     ConductorConfig,
+    ConfusionMatrix,
+    EmissionValidationMetrics,
     GateBaselines,
+    LinearDiscriminant,
+    OccupiedEmissionProfile,
     RoomConfig,
+    ScenarioEmissionMetrics,
     SensorConfig,
     StatBaseline,
     Tunables,
@@ -33,6 +39,82 @@ from .core.model import (
 )
 
 _TUNABLE_TYPES = {f.name: type(f.default) for f in fields(Tunables)}
+
+
+def _confusion(raw: Mapping[str, Any]) -> ConfusionMatrix:
+    if not isinstance(raw, Mapping):
+        raise TypeError("confusion matrix must be a mapping")
+    return ConfusionMatrix(
+        true_positive=int(raw.get("true_positive", 0)),
+        false_positive=int(raw.get("false_positive", 0)),
+        true_negative=int(raw.get("true_negative", 0)),
+        false_negative=int(raw.get("false_negative", 0)),
+    )
+
+
+def _occupied_profile(raw: Any) -> OccupiedEmissionProfile | None:
+    """Parse a persisted profile defensively; malformed data means fallback."""
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        validation_raw = raw.get("validation")
+        validation = None
+        if isinstance(validation_raw, Mapping):
+            validation = EmissionValidationMetrics(
+                threshold=float(validation_raw.get("threshold", 0.0)),
+                confusion=_confusion(validation_raw.get("confusion", {})),
+                scenarios=tuple(
+                    ScenarioEmissionMetrics(
+                        name=str(item["name"]),
+                        expected_occupied=bool(item["expected_occupied"]),
+                        confusion=_confusion(item.get("confusion", {})),
+                        mean_discriminant=float(item["mean_discriminant"]),
+                        minimum_discriminant=float(item["minimum_discriminant"]),
+                        maximum_discriminant=float(item["maximum_discriminant"]),
+                    )
+                    for item in validation_raw.get("scenarios", [])
+                ),
+                empty_mean_rate=(
+                    float(validation_raw["empty_mean_rate"])
+                    if validation_raw.get("empty_mean_rate") is not None
+                    else None
+                ),
+                occupied_mean_rates={
+                    str(key): float(value)
+                    for key, value in (validation_raw.get("occupied_mean_rates") or {}).items()
+                },
+            )
+
+        def discriminant(key: str) -> LinearDiscriminant:
+            item = raw[key]
+            return LinearDiscriminant(
+                move_weight=float(item["move_weight"]),
+                still_weight=float(item["still_weight"]),
+                intercept=float(item["intercept"]),
+            )
+
+        profile = OccupiedEmissionProfile(
+            active=discriminant("active"),
+            settled=discriminant("settled"),
+            path=str(raw.get("path", "aggregate")),
+            active_weight=float(raw.get("active_weight", 0.5)),
+            evidence_scale=float(raw.get("evidence_scale", 1.0)),
+            evidence_min=float(raw.get("evidence_min", -3.0)),
+            evidence_max=float(raw.get("evidence_max", 3.0)),
+            fingerprint=str(raw.get("fingerprint", "")),
+            empty_rows=int(raw.get("empty_rows", 0)),
+            active_rows=int(raw.get("active_rows", 0)),
+            settled_rows=int(raw.get("settled_rows", 0)),
+            validation=validation,
+        )
+        if profile.path not in {"aggregate", "gate"} or not profile.fingerprint:
+            return None
+        emissions.occupied_discriminant(profile, (0.0, 0.0))
+        emissions.learned_evidence_rate(profile, (0.0, 0.0))
+        emissions.validate_persisted_profile(profile)
+        return profile
+    except AttributeError, KeyError, OverflowError, TypeError, ValueError:
+        return None
 
 
 def build_tunables(options: Mapping[str, Any]) -> Tunables:
@@ -136,6 +218,7 @@ def baselines_from_options(options: Mapping[str, Any]) -> dict[str, ZoneBaseline
                 )
                 for key, s in (b.get("stats") or {}).items()
             },
+            occupied_profile=_occupied_profile(b.get("occupied_profile")),
         )
         for zone_id, b in raw.items()
     }

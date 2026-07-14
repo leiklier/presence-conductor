@@ -28,6 +28,9 @@ controller (a later PR) is the single reader, via :func:`.config.build_config`.
   Written only when the options flow saves the tunables section; missing keys
   (or the whole missing dict) fall back to the dataclass defaults in
   :func:`.config.build_config`.
+- ``CONF_CALIBRATION_MODE`` — the operator-selected calibration workflow:
+  ``skip``, ``simple`` (the backward-compatible default), or ``full``. The
+  choice is configuration intent only; runtime capture is started separately.
 - ``CONF_BASELINES`` — ``dict[zone_id, {"move_mu", "move_sigma", "still_mu",
   "still_sigma"}]``, optionally extended with ``"gates": {gate_index_str:
   {"move_mu", "move_sigma", "still_mu", "still_sigma"}}`` (spec rule 3.6;
@@ -51,6 +54,17 @@ CONF_ZONES = "zones"
 CONF_ROOMS = "rooms"
 CONF_TUNABLES = "tunables"
 CONF_BASELINES = "baselines"
+CONF_CALIBRATION_MODE = "calibration_mode"
+
+CALIBRATION_MODE_SKIP = "skip"
+CALIBRATION_MODE_SIMPLE = "simple"
+CALIBRATION_MODE_FULL = "full"
+DEFAULT_CALIBRATION_MODE = CALIBRATION_MODE_SIMPLE
+CALIBRATION_MODES: tuple[str, ...] = (
+    CALIBRATION_MODE_SKIP,
+    CALIBRATION_MODE_SIMPLE,
+    CALIBRATION_MODE_FULL,
+)
 
 # Entity roles: the per-sensor ``entities`` map keys, mirroring the fields of
 # ``core.events.SensorFrame`` (rule 1.1). ``detection_distance`` is part of

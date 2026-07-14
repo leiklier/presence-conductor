@@ -743,10 +743,11 @@ async def test_full_entity_inventory(hass: HomeAssistant) -> None:
     registry = er.async_get(hass)
     entries = er.async_entries_for_config_entry(registry, entry.entry_id)
     # Per zone: occupancy, motion, activity, confidence, dwell, calibration
-    # status, pass-by event, calibration-outcome event, record-baseline button. Per room:
+    # status, pass-by event, calibration-outcome event, record-baseline and
+    # cancel-calibration buttons. Per room:
     # occupancy, motion, settled, activity, confidence, pass-by event.
     # Home: anyone_home + confidence. Plus enabled + state.
-    assert len(entries) == 5 * 9 + 3 * 6 + 4
+    assert len(entries) == 5 * 10 + 3 * 6 + 4
 
     for zone_id in ("kjokken", "kontor_pult", "kontor_dor", "sofakrok", "spisebord"):
         for entity_id in (
