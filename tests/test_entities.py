@@ -18,7 +18,11 @@ from pytest_homeassistant_custom_component.common import (
 
 from custom_components.presence_conductor.calibration import CALIBRATION_ISSUE_ID_PREFIX
 from custom_components.presence_conductor.const import DOMAIN
-from custom_components.presence_conductor.core.events import RecordBaseline, SetEnabled
+from custom_components.presence_conductor.core.events import (
+    RecordBaseline,
+    SetEnabled,
+    StartFullCalibration,
+)
 from custom_components.presence_conductor.core.model import Activity, Health, Tunables
 from custom_components.presence_conductor.core.stats import floor_calibration_fingerprint
 from tests.test_controller import KONTOR, OPTIONS, SOFAKROK, setup_conductor
@@ -34,6 +38,55 @@ def entity_id_for(hass: HomeAssistant, platform: str, unique_id: str) -> str:
 # ---------------------------------------------------------------------------
 # zone binary sensors
 # ---------------------------------------------------------------------------
+
+
+async def test_full_mode_exposes_guided_controls_and_service(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    options = deepcopy(OPTIONS)
+    options["calibration_mode"] = "full"
+    entry, _controller, fake = await setup_conductor(hass, monkeypatch, options=options)
+    start = entity_id_for(hass, "button", f"{entry.entry_id}_sofakrok_start_full_calibration")
+    assert hass.states.get(start).state != "unavailable"
+
+    await hass.services.async_call("button", "press", {"entity_id": start}, blocking=True)
+    assert fake.events_of(StartFullCalibration)[-1] == StartFullCalibration("sofakrok")
+
+    await hass.services.async_call(
+        DOMAIN,
+        "start_full_calibration",
+        {"zone_id": "sofakrok", "duration": 120},
+        blocking=True,
+    )
+    assert fake.events_of(StartFullCalibration)[-1] == StartFullCalibration("sofakrok", 120)
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_status", "action_fragment"),
+    (
+        ("skip", "skipped", None),
+        ("full", "recalibration_required", "Start full calibration"),
+    ),
+)
+async def test_calibration_mode_drives_diagnostic_guidance(
+    hass: HomeAssistant,
+    monkeypatch,
+    mode: str,
+    expected_status: str,
+    action_fragment: str | None,
+) -> None:
+    options = deepcopy(OPTIONS)
+    options["calibration_mode"] = mode
+    entry, _controller, _fake = await setup_conductor(hass, monkeypatch, options=options)
+    entity_id = entity_id_for(hass, "sensor", f"{entry.entry_id}_zone_sofakrok_calibration_status")
+    state = hass.states.get(entity_id)
+    assert state is not None
+    assert state.state == expected_status
+    if action_fragment is None:
+        assert state.attributes["action"] is None
+    else:
+        assert action_fragment in state.attributes["action"]
+
 
 # Zone state entities ship disabled (rooms and home are the consumer
 # surface; tests/test_devices.py covers the defaults). Tests exercising
@@ -622,11 +675,12 @@ async def test_entity_inventory_spans_hub_and_room_devices(
     registry = er.async_get(hass)
     entries = er.async_entries_for_config_entry(registry, entry.entry_id)
     # 3 zones x (occupancy, motion, activity, confidence, dwell, calibration
-    # status, pass-by, calibration outcome, record baseline) + 2 rooms x (occupancy, motion,
-    # settled, activity, confidence, pass-by) + anyone_home + home
+    # status, pass-by, calibration outcome, record baseline, cancel calibration)
+    # + 2 rooms x (occupancy, motion, settled, activity, confidence, pass-by)
+    # + anyone_home + home
     # confidence + enabled + state. Disabled-by-default zone entities are
     # registered like the rest.
-    assert len(entries) == 3 * 9 + 2 * 6 + 4
+    assert len(entries) == 3 * 10 + 2 * 6 + 4
     # Hub + one device per room; the layout itself is tests/test_devices.py.
     assert len({e.device_id for e in entries}) == 3
 

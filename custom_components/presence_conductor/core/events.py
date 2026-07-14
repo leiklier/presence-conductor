@@ -95,3 +95,31 @@ class RecordBaseline(Event):
 
     zone_id: str
     duration: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StartFullCalibration(Event):
+    """Start a guided occupied-emission calibration for one zone.
+
+    The existing empty-room baseline is recorded first. Subsequent labeled
+    phases are started explicitly with :class:`AdvanceFullCalibration`, so an
+    operator has time to read and carry out each instruction.
+    """
+
+    zone_id: str
+    baseline_duration: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AdvanceFullCalibration(Event):
+    """Record the next labeled phase of an active full calibration."""
+
+    zone_id: str
+    duration: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CancelCalibration(Event):
+    """Cancel an empty or full calibration without replacing saved data."""
+
+    zone_id: str

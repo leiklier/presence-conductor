@@ -6,7 +6,10 @@ instance is involved.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
+
+import pytest
 
 from custom_components.presence_conductor.config import (
     baselines_from_options,
@@ -230,3 +233,80 @@ def test_baselines_stats_round_trip() -> None:
         "still_gate": StatBaseline(mu=0.9, sigma=0.62, fingerprint=""),
     }
     assert baselines["kontor"].stats == {}  # backward compatible (3.7)
+
+
+def test_occupied_profile_round_trip_and_malformed_fallback() -> None:
+    options = _options()
+    options["baselines"]["sofakrok"]["occupied_profile"] = {
+        "active": {"move_weight": 2.0, "still_weight": 0.5, "intercept": -1.0},
+        "settled": {"move_weight": 0.25, "still_weight": 3.0, "intercept": -1.5},
+        "path": "aggregate",
+        "fingerprint": "emission-v1",
+        "empty_rows": 60,
+        "active_rows": 60,
+        "settled_rows": 120,
+        "validation": {
+            "threshold": 0.0,
+            "confusion": {
+                "true_positive": 43,
+                "false_positive": 1,
+                "true_negative": 14,
+                "false_negative": 2,
+            },
+            "empty_mean_rate": -0.8,
+            "occupied_mean_rates": {"moving": 1.2, "standing": 0.9, "seated": 0.6},
+            "scenarios": [
+                {
+                    "name": "empty",
+                    "expected_occupied": False,
+                    "confusion": {
+                        "true_positive": 0,
+                        "false_positive": 1,
+                        "true_negative": 14,
+                        "false_negative": 0,
+                    },
+                    "mean_discriminant": -1.0,
+                    "minimum_discriminant": -2.0,
+                    "maximum_discriminant": 0.2,
+                },
+                *[
+                    {
+                        "name": name,
+                        "expected_occupied": True,
+                        "confusion": {
+                            "true_positive": 15 if name == "standing" else 14,
+                            "false_positive": 0,
+                            "true_negative": 0,
+                            "false_negative": 0 if name == "standing" else 1,
+                        },
+                        "mean_discriminant": 1.5,
+                        "minimum_discriminant": -0.1,
+                        "maximum_discriminant": 3.0,
+                    }
+                    for name in ("moving", "standing", "seated")
+                ],
+            ],
+        },
+    }
+
+    valid_payload = deepcopy(options["baselines"]["sofakrok"]["occupied_profile"])
+    profile = baselines_from_options(options)["sofakrok"].occupied_profile
+    assert profile is not None
+    assert profile.active.move_weight == 2.0
+    assert profile.path == "aggregate"
+    assert profile.validation is not None
+    assert profile.validation.confusion.sensitivity == pytest.approx(43 / 45)
+
+    options["baselines"]["sofakrok"]["occupied_profile"] = {"active": "broken"}
+    assert baselines_from_options(options)["sofakrok"].occupied_profile is None
+
+    for mutate in (
+        lambda item: item.update(empty_rows=float("inf")),
+        lambda item: item["validation"].update(occupied_mean_rates=[]),
+        lambda item: item["validation"]["confusion"].update(false_positive=-1),
+        lambda item: item["validation"].update(threshold=0.5),
+    ):
+        malformed = deepcopy(valid_payload)
+        mutate(malformed)
+        options["baselines"]["sofakrok"]["occupied_profile"] = malformed
+        assert baselines_from_options(options)["sofakrok"].occupied_profile is None

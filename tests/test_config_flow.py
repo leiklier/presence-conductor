@@ -13,7 +13,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.presence_conductor.const import DOMAIN
+from custom_components.presence_conductor.const import (
+    CALIBRATION_MODE_FULL,
+    CALIBRATION_MODE_SIMPLE,
+    CALIBRATION_MODE_SKIP,
+    CONF_CALIBRATION_MODE,
+    DOMAIN,
+)
 from custom_components.presence_conductor.core.model import Tunables
 from tests.test_discovery import (
     KJOKKEN_PREFIX,
@@ -226,6 +232,14 @@ async def test_full_happy_path(hass: HomeAssistant) -> None:
         result["flow_id"], _zone_input("Spisebord", "Stue", 260, 450)
     )
 
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "calibration_mode"
+    markers = {str(key): key for key in result["data_schema"].schema}
+    assert markers[CONF_CALIBRATION_MODE].default() == CALIBRATION_MODE_SIMPLE
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_CALIBRATION_MODE: CALIBRATION_MODE_FULL}
+    )
+
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "Presence Conductor"
     assert result["data"] == {}
@@ -304,6 +318,7 @@ async def test_full_happy_path(hass: HomeAssistant) -> None:
             {"room_id": "kontor", "name": "Kontor"},
             {"room_id": "stue", "name": "Stue"},
         ],
+        CONF_CALIBRATION_MODE: CALIBRATION_MODE_FULL,
     }
 
 
@@ -332,11 +347,17 @@ async def test_overlap_warning_path(hass: HomeAssistant) -> None:
     assert "Spisebord" in overlaps
     assert "Stue" in overlaps
 
-    # Non-blocking: submitting proceeds to entry creation.
+    # Non-blocking: submitting proceeds to the calibration choice.
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "calibration_mode"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_CALIBRATION_MODE: CALIBRATION_MODE_SKIP}
+    )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     zones = result["result"].options["zones"]
     assert [zone["zone_id"] for zone in zones] == ["sofakrok", "spisebord"]
+    assert result["result"].options[CONF_CALIBRATION_MODE] == CALIBRATION_MODE_SKIP
 
 
 async def test_manual_sensor_path(hass: HomeAssistant) -> None:
@@ -389,6 +410,11 @@ async def test_manual_sensor_path(hass: HomeAssistant) -> None:
         result["flow_id"], _zone_input("Bad", "Bad")
     )
 
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "calibration_mode"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_CALIBRATION_MODE: CALIBRATION_MODE_SIMPLE}
+    )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     options = dict(result["result"].options)
     assert options["sensors"] == [
@@ -415,6 +441,7 @@ async def test_manual_sensor_path(hass: HomeAssistant) -> None:
         },
     ]
     assert [zone["zone_id"] for zone in options["zones"]] == ["gang", "bad"]
+    assert options[CONF_CALIBRATION_MODE] == CALIBRATION_MODE_SIMPLE
 
 
 async def test_abort_single_instance(hass: HomeAssistant) -> None:
@@ -488,6 +515,11 @@ async def test_second_fallback_same_sensor_rejected(hass: HomeAssistant) -> None
 
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], _zone_input("Kontor dør", "Kontor", 150, 400)
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "calibration_mode"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_CALIBRATION_MODE: CALIBRATION_MODE_SIMPLE}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
 
@@ -609,6 +641,36 @@ async def test_options_tunables_roundtrip(hass: HomeAssistant) -> None:
     assert entry.options["tunables"] == {**TUNABLE_DEFAULTS, "theta_on": 0.9, "tau_decay": 120.0}
     assert entry.options["baselines"] == _base_options()["baselines"]
     assert entry.options["sensors"] == _base_options()["sensors"]
+
+
+async def test_options_calibration_defaults_to_simple_and_preserves_options(
+    hass: HomeAssistant,
+) -> None:
+    """Legacy entries default to simple; changing mode touches no other key."""
+    entry = await _add_entry(hass)
+    assert CONF_CALIBRATION_MODE not in entry.options
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] is FlowResultType.MENU
+    assert "calibration" in result["menu_options"]
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "calibration"}
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "calibration"
+    markers = {str(key): key for key in result["data_schema"].schema}
+    assert markers[CONF_CALIBRATION_MODE].default() == CALIBRATION_MODE_SIMPLE
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_CALIBRATION_MODE: CALIBRATION_MODE_FULL}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == {
+        **_base_options(),
+        CONF_CALIBRATION_MODE: CALIBRATION_MODE_FULL,
+    }
+    assert entry.options["baselines"] == _base_options()["baselines"]
 
 
 async def test_options_reject_inverted_attack_gap(hass: HomeAssistant) -> None:

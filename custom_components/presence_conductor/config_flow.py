@@ -5,7 +5,7 @@ manually assigned sensors -> zones (one form per zone, iterating over the
 sensors) -> a non-blocking overlap warning (rule 2.2) -> entry creation.
 Everything is stored in ``entry.options`` (``entry.data`` stays empty) using
 the contract documented in const.py. The options flow edits three sections —
-sensors (add/remove), zones, tunables — and merges its result back,
+sensors (add/remove), zones, calibration mode, tunables — and merges its result back,
 preserving every key it does not own (notably the runtime-written
 ``baselines``, rule 3.3).
 """
@@ -43,10 +43,15 @@ from . import discovery
 from .const import (
     ALL_ROLES,
     BINARY_ROLES,
+    CALIBRATION_MODE_FULL,
+    CALIBRATION_MODE_SIMPLE,
+    CALIBRATION_MODE_SKIP,
+    CONF_CALIBRATION_MODE,
     CONF_ROOMS,
     CONF_SENSORS,
     CONF_TUNABLES,
     CONF_ZONES,
+    DEFAULT_CALIBRATION_MODE,
     DOMAIN,
     ROLE_DETECTION_DISTANCE,
     ROLE_MOVE_ENERGY,
@@ -132,6 +137,25 @@ def _tunables_schema() -> vol.Schema:
 
 def _tunables_from_input(user_input: dict[str, Any]) -> dict[str, float]:
     return {f.name: user_input[f.name] for f in dataclasses.fields(Tunables)}
+
+
+def _calibration_mode_schema(default: str = DEFAULT_CALIBRATION_MODE) -> vol.Schema:
+    """Calibration workflow choice; capture is intentionally a later action."""
+    return vol.Schema(
+        {
+            vol.Required(CONF_CALIBRATION_MODE, default=default): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        CALIBRATION_MODE_SIMPLE,
+                        CALIBRATION_MODE_FULL,
+                        CALIBRATION_MODE_SKIP,
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                    translation_key="calibration_mode",
+                )
+            )
+        }
+    )
 
 
 def _sensor_schema() -> vol.Schema:
@@ -411,6 +435,20 @@ class PresenceConductorConfigFlow(ConfigFlow, domain=DOMAIN):
         """Non-blocking warning on same-room cross-sensor overlap (rule 2.2)."""
         pairs = _overlapping_pairs(self._zones)
         if user_input is not None or not pairs:
+            return await self.async_step_calibration_mode()
+        return self.async_show_form(
+            step_id="overlap",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                "overlaps": _describe_overlaps(pairs, self._sensors, self._rooms)
+            },
+        )
+
+    async def async_step_calibration_mode(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose the initial calibration workflow without starting capture."""
+        if user_input is not None:
             return self.async_create_entry(
                 title="Presence Conductor",
                 data={},
@@ -418,14 +456,12 @@ class PresenceConductorConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_SENSORS: self._sensors,
                     CONF_ZONES: self._zones,
                     CONF_ROOMS: _rooms_option(self._zones, self._rooms),
+                    CONF_CALIBRATION_MODE: user_input[CONF_CALIBRATION_MODE],
                 },
             )
         return self.async_show_form(
-            step_id="overlap",
-            data_schema=vol.Schema({}),
-            description_placeholders={
-                "overlaps": _describe_overlaps(pairs, self._sensors, self._rooms)
-            },
+            step_id="calibration_mode",
+            data_schema=_calibration_mode_schema(),
         )
 
 
@@ -467,7 +503,21 @@ class PresenceConductorOptionsFlow(OptionsFlow):
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Section menu."""
-        return self.async_show_menu(step_id="init", menu_options=["sensors", "zones", "tunables"])
+        return self.async_show_menu(
+            step_id="init", menu_options=["sensors", "zones", "calibration", "tunables"]
+        )
+
+    async def async_step_calibration(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Update calibration intent while preserving every other option."""
+        if user_input is not None:
+            return self._save({CONF_CALIBRATION_MODE: user_input[CONF_CALIBRATION_MODE]})
+        stored = self.config_entry.options.get(CONF_CALIBRATION_MODE, DEFAULT_CALIBRATION_MODE)
+        return self.async_show_form(
+            step_id="calibration",
+            data_schema=_calibration_mode_schema(str(stored)),
+        )
 
     # ------------------------------------------------------------------
     # Sensors section: add (discovered or manual) / remove.
