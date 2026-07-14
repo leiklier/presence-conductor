@@ -88,6 +88,7 @@ class Plan:
         "_pending",
         "events",
         "persist_calibration",
+        "persist_calibration_zones",
         "suppress_outputs",
         "timer_cancels",
         "timer_starts",
@@ -99,6 +100,9 @@ class Plan:
         self.timer_starts: list[StartTimer] = []
         self.timer_cancels: list[CancelTimer] = []
         self.persist_calibration: bool = False
+        #: Zones whose calibration committed in this plan. Empty retains
+        #: the legacy adapter contract (persist all) for test doubles.
+        self.persist_calibration_zones: set[str] = set()
         self.suppress_outputs: bool = suppress_outputs
 
     def emit(self, event: EmittedEvent) -> None:

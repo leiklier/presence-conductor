@@ -799,6 +799,7 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
         zst.last_adapt_at = None  # new floor: re-anchor the adaptation EMA
         # 3.3: baselines persist in the config entry (adapter saves them).
         plan.persist_calibration = True
+        plan.persist_calibration_zones.add(zone.zone_id)
     plan.emit_control(
         BaselineRecorded(
             zone_id=zone.zone_id,

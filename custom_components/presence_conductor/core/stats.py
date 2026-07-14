@@ -24,6 +24,22 @@ if TYPE_CHECKING:
     from .model import Tunables
 
 
+def floor_calibration_fingerprint(t: Tunables) -> str:
+    """Stable compatibility key for persisted empty-channel floor fits.
+
+    Unlike statistic calibration, the robust location/scale fit is shared by
+    aggregate and gate channels.  Keep this key present even for a perfectly
+    quiescent window, where no empirical statistic calibration is stored.
+    """
+    return "|".join(
+        (
+            "v1",
+            f"floor_min={t.sigma_min:.17g}",
+            f"quantum={t.energy_quantum:.17g}",
+        )
+    )
+
+
 def calibration_fingerprint(path: str, owned: tuple[int, ...], t: Tunables) -> str:
     """Stable compatibility key for a persisted statistic calibration.
 

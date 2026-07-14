@@ -503,6 +503,9 @@ class ZoneBaselines:
     #: Sensor identity that produced the calibration. Legacy/programmatic
     #: records omit it for backward compatibility; new writes are bound.
     sensor_id: str | None = None
+    #: Empty-channel floor-fit settings. Unlike statistic fingerprints this
+    #: is always written, including for a quiescent calibration window.
+    floor_fingerprint: str | None = None
     #: Gate resolution that produced a persisted gate family. Aggregate
     #: floors do not depend on it; a mismatch invalidates gate paths only.
     gate_size_cm: float | None = None

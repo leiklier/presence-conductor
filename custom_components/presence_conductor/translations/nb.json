@@ -303,7 +303,21 @@
           "enabled": "Aktivert",
           "disabled": "Deaktivert"
         }
+      },
+      "calibration_status": {
+        "state": {
+          "ready": "Klar",
+          "uncalibrated": "Ikke kalibrert",
+          "recalibration_required": "Ny kalibrering kreves",
+          "calibrating": "Kalibrerer"
+        }
       }
+    }
+  },
+  "issues": {
+    "calibration_required": {
+      "title": "Tilstedeværelseskalibreringen trenger oppfølging",
+      "description": "Presence Conductor bruker sikker reservekalibrering for én eller flere soner.\n\n{details}\n\nHold hver berørt sone tom og trykk på **Registrer grunnlinje**-knappen. Standard opptakstid er 300 sekunder."
     }
   },
   "services": {

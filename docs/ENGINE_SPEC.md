@@ -43,7 +43,15 @@ full output set even though they fuse into one room.
 - **1.1 Frame.** The adapter coalesces a sensor's entity states into
   `SensorFrame(sensor_id, moving_distance_cm, still_distance_cm, move_energy,
   still_energy, has_target, has_moving_target, has_still_target, gate_move,
-  gate_still)` and submits it whenever any underlying entity changes.
+  gate_still)` and submits it whenever any underlying entity is reported.
+  Home Assistant routes exact same-state/same-attribute writes through the
+  entity-filtered `state_reported` event (unless force-update makes them
+  `state_changed`); the adapter subscribes to both, so observation freshness
+  does not depend on ESPHome `force_update: true`. A same-value
+  attribute-changing `state_changed` event still updates the cached entity
+  view, but conservatively does not certify a new radar observation: Home
+  Assistant cannot distinguish a real sample attribute from metadata churn,
+  and cached high energy must not confirm its own fast-attack candidate.
   Distance and energy fields carry the **last reported** value (`None` only
   when never reported / unparseable): the device deduplicates identical
   publishes, so a frozen value is normal and the adapter must not null a
@@ -325,6 +333,15 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   an operator-requested control-plane action, so this outcome remains
   visible while presence outputs are disabled; occupancy and pass-by
   publication remain suppressed.
+  Startup/reload compatibility is independently observable: every zone has
+  an enabled diagnostic calibration-status entity (`ready`, `uncalibrated`,
+  `recalibration_required`, or `calibrating`) with bounded reason codes,
+  human-readable reasons, the active aggregate/gate runtime source, and the
+  empirical/analytic statistic source. Any non-ready zone creates one
+  nonpersistent warning in Home Assistant Repairs for the config entry; it
+  names all affected zones and is removed only when every zone is ready.
+  Enabling gate evidence with a configured gate channel but no complete,
+  compatible gate family is explicitly reported as aggregate fallback.
   **Lifecycle:** while the window is open the zone's estimator is
   **suspended** — the operator has asserted emptiness, so scoring the
   incoming frames against the old (possibly wrong) floors would let the
@@ -411,13 +428,16 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   rows converts it to a decorrelation time in seconds for 4.2; observation
   indices are never compared directly with wall-clock seconds. Persisted
   default, persisted aggregate, and persisted per-gate scales are always
-  clamped to the current quantization-aware hard floor on load. Persisted statistics carry a
-  versioned fingerprint of the path, exact owned-gate set, floor-fit settings
-  (`sigma_min` and `energy_quantum`), and score transform. A mismatch after
-  zone/tunable edits discards the empirical statistic and uses the analytic
-  fallback. Changing the energy quantum requires a fresh RecordBaseline for
-  a complete UCB fit; the hard floor prevents one reporting step from
-  becoming a rare-tail attack in the meantime. A path whose fresh rows fall below `stat_min_rows`
+  clamped to the current quantization-aware hard floor on load. Every newly
+  persisted baseline carries an always-present versioned floor-fit fingerprint
+  (`sigma_min` and `energy_quantum`), including a quiescent window that stores
+  no empirical statistic. A mismatch discards its fitted floors and requires
+  recalibration. Persisted statistics separately carry a versioned fingerprint
+  of the path, exact owned-gate set, floor-fit settings, and score transform;
+  a mismatch after zone/tunable edits discards the empirical statistic and uses
+  the analytic fallback. Changing the energy quantum therefore requires a fresh
+  RecordBaseline for a complete UCB fit; the default floor prevents one
+  reporting step from becoming a rare-tail attack in the meantime. A path whose fresh rows fall below `stat_min_rows`
   keeps the analytic fallback — the transactional coverage rules (3.3)
   decide whether the window as a whole commits.
 - **3.8 Held evidence and the observation clock.** The integrator (4.1)

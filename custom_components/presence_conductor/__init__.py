@@ -122,10 +122,11 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     controller: PresenceConductorController | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-    if controller is not None:
-        await controller.async_stop()
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
+        if controller is not None:
+            await controller.async_stop()
+            controller.clear_calibration_issue()
         hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
         hass.data.get(DATA_RELOAD_BASELINE, {}).pop(entry.entry_id, None)
         if not hass.data.get(DOMAIN):

@@ -303,7 +303,21 @@
           "enabled": "Enabled",
           "disabled": "Disabled"
         }
+      },
+      "calibration_status": {
+        "state": {
+          "ready": "Ready",
+          "uncalibrated": "Uncalibrated",
+          "recalibration_required": "Recalibration required",
+          "calibrating": "Calibrating"
+        }
       }
+    }
+  },
+  "issues": {
+    "calibration_required": {
+      "title": "Presence calibration needs attention",
+      "description": "Presence Conductor is using safe fallback calibration for one or more zones.\n\n{details}\n\nKeep each affected zone empty and press its **Record baseline** button. The default recording time is 300 seconds."
     }
   },
   "services": {

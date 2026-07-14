@@ -35,6 +35,7 @@ from custom_components.presence_conductor.core.stats import (
     attack_threshold,
     calibration_fingerprint,
     clipped_mean,
+    floor_calibration_fingerprint,
     onesided_max_stats,
 )
 
@@ -635,6 +636,22 @@ class TestCalibrationCompatibility:
 
         h.send_frame(KONTOR, move_d=100.0, move_e=20.0, moving=True)
         assert h.zone(DESK).attack_count == 0
+
+    def test_changed_floor_fit_settings_invalidate_bound_calibration(self) -> None:
+        old = make_config(energy_quantum=0.01)
+        persisted = ZoneBaselines(
+            0.40,
+            0.03,
+            0.50,
+            0.04,
+            sensor_id=KONTOR,
+            floor_fingerprint=floor_calibration_fingerprint(old.tunables),
+        )
+        changed = make_config(energy_quantum=0.10)
+        h = Harness(changed, InitialSnapshot(baselines={DESK: persisted}))
+
+        assert h.zone(DESK).move_baseline.mu == pytest.approx(changed.tunables.default_mu)
+        assert h.zone(DESK).still_baseline.mu == pytest.approx(changed.tunables.default_mu)
 
     def test_sensor_reassignment_invalidates_persisted_calibration(self) -> None:
         config = make_config()

@@ -208,6 +208,14 @@ def test_baselines_gates_round_trip() -> None:
     assert baselines["kontor"].gates == {}  # backward compatible (3.6)
 
 
+def test_baseline_floor_fingerprint_round_trip() -> None:
+    options = _options()
+    options["baselines"]["sofakrok"]["floor_fingerprint"] = "v1|floor"
+    baselines = baselines_from_options(options)
+    assert baselines["sofakrok"].floor_fingerprint == "v1|floor"
+    assert baselines["kontor"].floor_fingerprint is None
+
+
 def test_baselines_stats_round_trip() -> None:
     """Rule 3.7: the optional "stats" mapping becomes StatBaseline records;
     pre-3.7 baselines load without it and fall back to the analytic values."""

@@ -115,6 +115,7 @@ def baselines_from_options(options: Mapping[str, Any]) -> dict[str, ZoneBaseline
             gate_indices=(
                 tuple(int(index) for index in b["gate_indices"]) if "gate_indices" in b else ()
             ),
+            floor_fingerprint=(str(b["floor_fingerprint"]) if "floor_fingerprint" in b else None),
             # Rule 3.7: optional statistic calibration. Baselines stored
             # before 3.7 have no "stats" key and fall back to the analytic
             # values.

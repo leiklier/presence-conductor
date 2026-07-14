@@ -273,6 +273,23 @@ async def test_attribute_only_state_event_is_not_a_measurement(
     assert after.frame_obs == before.frame_obs
 
 
+async def test_same_value_state_reported_is_a_measurement(hass: HomeAssistant, monkeypatch) -> None:
+    _, _controller, fake = await setup_conductor(hass, monkeypatch)
+    entity = KONTOR_ENTITIES["move_energy"]
+    hass.states.async_set(entity, "42.0")
+    await hass.async_block_till_done()
+    before = fake.events_of(SensorFrame)[-1]
+
+    # Exact same state + attributes emits state_reported in HA, even when
+    # the source entity does not opt into force_update.
+    hass.states.async_set(entity, "42.0")
+    await hass.async_block_till_done()
+    after = fake.events_of(SensorFrame)[-1]
+    assert after.move_obs == before.move_obs + 1
+    assert after.move_energy_obs == before.move_energy_obs + 1
+    assert after.frame_obs == before.frame_obs + 1
+
+
 async def test_non_numeric_state_is_none(hass: HomeAssistant, monkeypatch) -> None:
     _, _controller, fake = await setup_conductor(hass, monkeypatch)
 
@@ -524,6 +541,7 @@ async def test_persist_calibration_writes_options_without_reload(
         "still_mu": 0.062,
         "still_sigma": 0.02,
         "sensor_id": KONTOR,
+        "floor_fingerprint": "v1|floor_min=0.02|quantum=0.01",
         "gate_size_cm": 75.0,
     }
     # Every configured zone is captured; stored keys survive the merge.
@@ -692,5 +710,8 @@ async def test_unload_stops_ticks_and_timers(hass: HomeAssistant, monkeypatch, f
 
     # State changes no longer reach the (stopped) engine either.
     hass.states.async_set(KONTOR_ENTITIES["move_energy"], "50")
+    await hass.async_block_till_done()
+    assert len(fake.events) == submitted
+    hass.states.async_set(KONTOR_ENTITIES["move_energy"], "50")  # state_reported too
     await hass.async_block_till_done()
     assert len(fake.events) == submitted

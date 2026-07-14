@@ -73,6 +73,7 @@ async def test_entities_live_on_their_room_device(hass: HomeAssistant, monkeypat
         ("sensor", "activity"),
         ("sensor", "confidence"),
         ("sensor", "dwell"),
+        ("sensor", "calibration_status"),
         ("event", "pass_by"),
         ("button", "record_baseline"),
     ):
@@ -148,6 +149,9 @@ async def test_zone_state_entities_are_opt_in(hass: HomeAssistant, monkeypatch) 
     button = registry_entry("button", f"{entry.entry_id}_zone_sofakrok_record_baseline")
     assert button.disabled_by is None
     assert hass.states.get(button.entity_id) is not None
+    calibration = registry_entry("sensor", f"{entry.entry_id}_zone_sofakrok_calibration_status")
+    assert calibration.disabled_by is None
+    assert hass.states.get(calibration.entity_id) is not None
 
 
 async def test_room_and_home_entities_stay_enabled(hass: HomeAssistant, monkeypatch) -> None:

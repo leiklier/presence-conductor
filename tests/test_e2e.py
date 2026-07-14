@@ -15,11 +15,13 @@ saturates the evidence score and triggers the fast attack (rule 4.2).
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import timedelta
 from typing import Any
 
 import pytest
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_capture_events,
@@ -28,6 +30,7 @@ from pytest_homeassistant_custom_component.common import (
 
 from custom_components.presence_conductor.const import ALL_ROLES, DOMAIN, GATE_ROLES
 from custom_components.presence_conductor.controller import (
+    CALIBRATION_ISSUE_ID_PREFIX,
     EVENT_BASELINE_RECORDED,
     EVENT_PASS_BY,
 )
@@ -338,6 +341,47 @@ async def test_occupied_sensor_dropout_bridges_through_unknown(
     assert hass.states.get(OCC_ROOM_KONTOR).state == "on"
 
 
+async def test_identical_reports_keep_occupied_sensor_healthy(hass: HomeAssistant, freezer) -> None:
+    """state_reported measurements re-arm health without force_update."""
+    _entry, controller = await setup_e2e(hass)
+    await enter_zone(hass, freezer, KONTOR, "100.0")
+    assert hass.states.get(OCC_KONTOR_PULT).state == "on"
+
+    for _ in range(35):  # beyond stale_after, but with 1 Hz identical reports
+        hass.states.async_set(KONTOR["move_energy"], "82.0")
+        await hass.async_block_till_done()
+        await advance(hass, freezer, 1.0)
+
+    assert controller.state.zones["kontor_pult"].health.value == "ok"
+    assert hass.states.get(OCC_KONTOR_PULT).state == "on"
+
+
+async def test_attribute_only_metadata_cannot_confirm_cached_attack(
+    hass: HomeAssistant, freezer
+) -> None:
+    """Ambiguous attribute churn is not a second move-energy observation."""
+    _entry, controller = await setup_e2e(hass)
+    await set_states(
+        hass,
+        {
+            KONTOR["moving_distance"]: "100.0",
+            KONTOR["moving_target"]: "on",
+            KONTOR["target"]: "on",
+        },
+    )
+    await set_states(hass, {KONTOR["move_energy"]: "82.0"})
+    zone = controller.state.zones["kontor_pult"]
+    assert zone.attack_count == 1
+    assert hass.states.get(OCC_KONTOR_PULT).state == "off"
+
+    await advance(hass, freezer, 0.5)  # inside the valid confirmation window
+    hass.states.async_set(KONTOR["move_energy"], "82.0", {"metadata_revision": 1})
+    await hass.async_block_till_done()
+
+    assert zone.attack_count == 1
+    assert hass.states.get(OCC_KONTOR_PULT).state == "off"
+
+
 async def test_unavailable_entities_at_startup_recover(hass: HomeAssistant, freezer) -> None:
     """Sensors born unavailable seed UNKNOWN zones; the first frame heals."""
     _entry, _controller = await setup_e2e(hass, overrides={KJOKKEN["move_energy"]: "unavailable"})
@@ -392,6 +436,10 @@ async def test_record_baseline_service_persists_into_options(hass: HomeAssistant
     # the window under the scheduler, so assert the covering range.
     assert 1.4826 * 0.010 <= recorded["move_sigma"] <= 1.4826 * 0.020
     assert recorded["still_mu"] == pytest.approx(0.02)  # unchanged channel
+    assert recorded["floor_fingerprint"].startswith("v1|")
+    # A commit binds only its own zone; it must not silently bless unrelated
+    # legacy floors with current compatibility metadata.
+    assert "sensor_id" not in entry.options["baselines"]["sofakrok"]
     # The baselines-only write must not reload the entry.
     assert hass.data[DOMAIN][entry.entry_id] is controller
     # 3.3 observability: the outcome is on the bus and the event entity.
@@ -405,6 +453,76 @@ async def test_record_baseline_service_persists_into_options(hass: HomeAssistant
     assert outcome.state != "unknown"
     assert outcome.attributes["event_type"] == "recorded"
     assert outcome.attributes["coverage"]["move_agg"]["status"] == "calibrated"
+
+
+async def test_identical_reports_certify_quiescent_calibration(
+    hass: HomeAssistant, freezer
+) -> None:
+    """Repeated exact values arrive through state_reported and prove a live plateau."""
+    entry, _controller = await setup_e2e(
+        hass, options={**OPTIONS, "tunables": {"stat_min_rows": 2}}
+    )
+    captured = async_capture_events(hass, EVENT_BASELINE_RECORDED)
+    await hass.services.async_call(
+        DOMAIN, "record_baseline", {"zone_id": "kjokken", "duration": 5}, blocking=True
+    )
+
+    for _ in range(5):
+        # The world was seeded at exactly 2.0; these are EVENT_STATE_REPORTED
+        # writes unless force_update is enabled by the source entity.
+        await set_states(
+            hass,
+            {
+                KJOKKEN["move_energy"]: "2.0",
+                KJOKKEN["still_energy"]: "2.0",
+            },
+        )
+        await advance(hass, freezer, 1.0)
+    await advance(hass, freezer, 0.5)
+
+    assert len(captured) == 1
+    payload = captured[0].data
+    assert payload["success"] is True
+    assert payload["coverage"]["move_agg"]["status"] == "quiescent"
+    assert payload["coverage"]["still_agg"]["status"] == "quiescent"
+    assert entry.options["baselines"]["kjokken"]["sensor_id"] == "apollo_msr_2_kjokken"
+
+
+async def test_successful_recalibration_clears_diagnostic_and_repair_without_reload(
+    hass: HomeAssistant, freezer
+) -> None:
+    options = deepcopy(OPTIONS)
+    options["sensors"] = [options["sensors"][0]]
+    options["zones"] = [options["zones"][0]]
+    options["rooms"] = [options["rooms"][0]]
+    options["baselines"] = {"kjokken": dict(TIGHT_BASELINE)}  # legacy metadata
+    options["tunables"] = {"stat_min_rows": 2}
+    entry, _controller = await setup_e2e(hass, options=options)
+    status_id = "sensor.presence_conductor_kjokken_calibration_status"
+    issue_id = f"{CALIBRATION_ISSUE_ID_PREFIX}_{entry.entry_id}"
+    assert hass.states.get(status_id).state == "recalibration_required"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+    await hass.services.async_call(
+        DOMAIN, "record_baseline", {"zone_id": "kjokken", "duration": 5}, blocking=True
+    )
+    assert hass.states.get(status_id).state == "calibrating"
+    assert hass.states.get(status_id).attributes["action"] is None
+    for value in ("3.0", "4.0", "3.0", "4.0", "3.0"):
+        await set_states(
+            hass,
+            {
+                KJOKKEN["move_energy"]: value,
+                KJOKKEN["still_energy"]: value,
+            },
+        )
+        await advance(hass, freezer, 1.0)
+    await advance(hass, freezer, 0.5)
+
+    assert hass.states.get(status_id).state == "ready"
+    assert hass.states.get(status_id).attributes["reason_codes"] == []
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+    assert hass.data[DOMAIN][entry.entry_id] is not None  # no baseline-write reload
 
 
 async def test_record_baseline_rejection_is_visible_and_atomic(
@@ -621,11 +739,11 @@ async def test_full_entity_inventory(hass: HomeAssistant) -> None:
     entry, _controller = await setup_e2e(hass)
     registry = er.async_get(hass)
     entries = er.async_entries_for_config_entry(registry, entry.entry_id)
-    # Per zone: occupancy, motion, activity, confidence, dwell, pass-by
-    # event, calibration-outcome event, record-baseline button. Per room:
+    # Per zone: occupancy, motion, activity, confidence, dwell, calibration
+    # status, pass-by event, calibration-outcome event, record-baseline button. Per room:
     # occupancy, motion, settled, activity, confidence, pass-by event.
     # Home: anyone_home + confidence. Plus enabled + state.
-    assert len(entries) == 5 * 8 + 3 * 6 + 4
+    assert len(entries) == 5 * 9 + 3 * 6 + 4
 
     for zone_id in ("kjokken", "kontor_pult", "kontor_dor", "sofakrok", "spisebord"):
         for entity_id in (
@@ -634,6 +752,7 @@ async def test_full_entity_inventory(hass: HomeAssistant) -> None:
             f"sensor.presence_conductor_{zone_id}_activity",
             f"sensor.presence_conductor_{zone_id}_confidence",
             f"sensor.presence_conductor_{zone_id}_dwell",
+            f"sensor.presence_conductor_{zone_id}_calibration_status",
             f"event.presence_conductor_{zone_id}_pass_by",
             f"button.presence_conductor_{zone_id}_record_baseline",
         ):

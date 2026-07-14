@@ -105,8 +105,13 @@ class ConductorEngine:
             )
         for zone in self.config.zones:
             persisted = snapshot.baselines.get(zone.zone_id)
-            calibration_context_valid = persisted is not None and (
-                persisted.sensor_id is None or persisted.sensor_id == zone.sensor_id
+            calibration_context_valid = (
+                persisted is not None
+                and (persisted.sensor_id is None or persisted.sensor_id == zone.sensor_id)
+                and (
+                    persisted.floor_fingerprint is None
+                    or persisted.floor_fingerprint == stats.floor_calibration_fingerprint(t)
+                )
             )
             trusted = persisted if calibration_context_valid else None
             zst = ZoneState(
