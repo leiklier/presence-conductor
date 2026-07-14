@@ -367,9 +367,10 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   conditions, but never makes an uncalibrated family runtime-ready. Until a
   complete current family commits, gate data falls back to the aggregate
   path; default floors are not treated as a calibration. Persistence records
-  channel presence and the exact owned-gate set. Missing legacy metadata,
-  changed zone ownership, or an incomplete family invalidates that gate
-  path safely while leaving aggregate floors usable.
+  channel presence, the exact owned-gate set, and the sensor's gate
+  resolution. Missing legacy metadata, changed zone ownership/resolution,
+  or an incomplete family invalidates that gate path safely while leaving
+  aggregate floors usable.
 - **3.7 Statistic calibration.** Per zone, per channel and per evidence
   path (gate / aggregate), calibration produces `(m0, s0, c0)` — the mean
   and standard deviation of the raw statistic `S` (3.2) over the

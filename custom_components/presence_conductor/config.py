@@ -97,6 +97,7 @@ def baselines_from_options(options: Mapping[str, Any]) -> dict[str, ZoneBaseline
             still_mu=float(b["still_mu"]),
             still_sigma=float(b["still_sigma"]),
             sensor_id=str(b["sensor_id"]) if "sensor_id" in b else None,
+            gate_size_cm=float(b["gate_size_cm"]) if "gate_size_cm" in b else None,
             # Rule 3.6: optional per-gate floors. Baselines stored before
             # per-gate evidence existed (v0.1.0) have no "gates" key; gate
             # indices are stored as strings because options are JSON.

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import random
+from dataclasses import replace
 from statistics import NormalDist
 
 import pytest
@@ -668,6 +669,35 @@ class TestCalibrationCompatibility:
         assert "move_gate" not in zone.stat_cal
         h.send_frame(KONTOR, move_e=5.0, gate_move=gate_tuple({0: 60.0}, fill=5.0))
         assert not zone.move_from_gates
+
+    def test_gate_resolution_change_invalidates_same_index_family(self) -> None:
+        old = _gate_zone_config(40.0)
+        owned = (0,)
+        persisted = ZoneBaselines(
+            0.05,
+            0.05,
+            0.05,
+            0.05,
+            gates={0: GateBaselines(0.05, 0.05, 0.05, 0.05)},
+            gate_indices=owned,
+            sensor_id=KONTOR,
+            gate_size_cm=75.0,
+            stats={
+                "move_gate": StatBaseline(
+                    0.4,
+                    0.6,
+                    fingerprint=calibration_fingerprint("move_gate", owned, old.tunables),
+                )
+            },
+        )
+        # Both resolutions still assign gate 0, but it spans a different
+        # physical region and its learned floor/statistic are incompatible.
+        changed = replace(old, sensors=(SensorConfig(KONTOR, "Kontor", gate_size_cm=100.0),))
+        h = Harness(changed, InitialSnapshot(baselines={"z": persisted}))
+        zone = h.zone("z")
+        assert not zone.gate_move_ready
+        assert zone.gate_move_baselines == {}
+        assert "move_gate" not in zone.stat_cal
 
     def test_score_transform_change_invalidates_statistic(self) -> None:
         old = make_config(z_cap=6.0)

@@ -611,6 +611,7 @@ class PresenceConductorController:
                 "still_mu": zst.still_baseline.mu,
                 "still_sigma": zst.still_baseline.sigma,
                 "sensor_id": zone.sensor_id,
+                "gate_size_cm": self.config.sensor(zone.sensor_id).gate_size_cm,
             }
             # Rule 3.6: optional per-gate floors (string keys: options are
             # JSON). Channel-presence flags prevent a rejected/absent

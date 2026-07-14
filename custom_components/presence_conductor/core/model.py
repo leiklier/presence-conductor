@@ -503,6 +503,9 @@ class ZoneBaselines:
     #: Sensor identity that produced the calibration. Legacy/programmatic
     #: records omit it for backward compatibility; new writes are bound.
     sensor_id: str | None = None
+    #: Gate resolution that produced a persisted gate family. Aggregate
+    #: floors do not depend on it; a mismatch invalidates gate paths only.
+    gate_size_cm: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

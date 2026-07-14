@@ -123,6 +123,9 @@ class ConductorEngine:
                 owned = self.owned_gates[zone.zone_id]
                 gate_context_valid = (
                     persisted.gate_indices is None or persisted.gate_indices == owned
+                ) and (
+                    persisted.gate_size_cm is None
+                    or persisted.gate_size_cm == self.config.sensor(zone.sensor_id).gate_size_cm
                 )
                 # 3.6: persisted per-gate floors; zones stored before
                 # compatibility metadata existed simply fall back to the

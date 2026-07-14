@@ -524,6 +524,7 @@ async def test_persist_calibration_writes_options_without_reload(
         "still_mu": 0.062,
         "still_sigma": 0.02,
         "sensor_id": KONTOR,
+        "gate_size_cm": 75.0,
     }
     # Every configured zone is captured; stored keys survive the merge.
     assert set(entry.options["baselines"]) == {"kontor_pult", "kontor_dor", "sofakrok"}
