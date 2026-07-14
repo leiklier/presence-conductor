@@ -64,7 +64,7 @@ _STILL_ROLES = frozenset(
 _MOVE_ENERGY_ROLES = frozenset({ROLE_MOVE_ENERGY, *GATE_MOVE_ROLES})
 
 
-def as_float(state: State | None) -> float | None:
+def _as_float(state: State | None) -> float | None:
     """Return a numeric HA state, or ``None`` when it is not usable."""
     if state is None or state.state in UNAVAILABLE_STATES:
         return None
@@ -102,7 +102,7 @@ class SensorView:
         parseable = state is not None and (
             state.state in {STATE_ON, STATE_OFF}
             if role in {ROLE_TARGET, ROLE_MOVING_TARGET, ROLE_STILL_TARGET}
-            else as_float(state) is not None
+            else _as_float(state) is not None
         )
         valid_measurement = (
             measurement
@@ -128,24 +128,23 @@ class SensorView:
                     self.gate_move = values
                 else:
                     self.gate_still = values
-            values[index] = as_float(state)
+            values[index] = _as_float(state)
             return
 
-        match role:
-            case "move_energy":
-                self.move_energy = as_float(state)
-            case "still_energy":
-                self.still_energy = as_float(state)
-            case "moving_distance":
-                self.moving_distance = as_float(state)
-            case "still_distance":
-                self.still_distance = as_float(state)
-            case "target":
-                self.has_target = _is_on(state)
-            case "moving_target":
-                self.has_moving_target = _is_on(state)
-            case "still_target":
-                self.has_still_target = _is_on(state)
+        if role == ROLE_MOVE_ENERGY:
+            self.move_energy = _as_float(state)
+        elif role == ROLE_STILL_ENERGY:
+            self.still_energy = _as_float(state)
+        elif role == ROLE_MOVING_DISTANCE:
+            self.moving_distance = _as_float(state)
+        elif role == ROLE_STILL_DISTANCE:
+            self.still_distance = _as_float(state)
+        elif role == ROLE_TARGET:
+            self.has_target = _is_on(state)
+        elif role == ROLE_MOVING_TARGET:
+            self.has_moving_target = _is_on(state)
+        elif role == ROLE_STILL_TARGET:
+            self.has_still_target = _is_on(state)
 
     def frame(self, sensor_id: str) -> SensorFrame:
         """Build the complete cached frame consumed by the core."""

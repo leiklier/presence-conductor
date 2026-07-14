@@ -151,9 +151,13 @@ count. See [Estimator rationale](ESTIMATOR_RATIONALE.md) for derivations.
   time constant `tau_background`. Adaptation may move `mu` and increase
   `sigma`; it may not decrease the conservative calibrated scale. It stops
   while unavailable, occupied, or explicitly calibrating.
-- **3.5 Still dropout.** A usable distance with energy below the active floor
-  is treated as no positive evidence, not as observed absence. Departure needs
-  at-floor evidence or silence-driven relaxation (4.1).
+- **3.5 Still-margin recovery.** While the frozen still distance remains usable
+  under 2.7, energy above its calibrated floor contributes positive evidence
+  even when the radar's binary still-target flag has dropped. This margin
+  bridges measured still-target dropout gaps. Energy at or below the floor, or
+  a zone not selected by either ordinary distance gating or the 2.3 fallback,
+  produces a zero raw statistic; while the channel is observationally live
+  (3.8), centering makes that absence evidence.
 - **3.6 Gate calibration.** Gate floors are independent per channel and gate.
   Runtime gate readiness requires a complete, context-compatible family.
   Partial, absent, legacy, or resolution-mismatched families fall back to the

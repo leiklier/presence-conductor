@@ -267,7 +267,7 @@ class CalibrationManager:
     @callback
     def refresh(self, zone_ids: set[str] | None = None) -> None:
         """Re-evaluate bounded per-zone readiness from known provenance."""
-        selected = zone_ids or {zone.zone_id for zone in self._config.zones}
+        selected = {zone.zone_id for zone in self._config.zones} if zone_ids is None else zone_ids
         for zone_id in selected:
             if self._config.zone_or_none(zone_id) is not None:
                 self._diagnostics[zone_id] = self._diagnose_zone(zone_id)
@@ -358,6 +358,8 @@ class CalibrationManager:
 
         merged = {**stored, **current}
         if merged != stored:
+            # The options listener in __init__.py ignores baselines-only
+            # diffs, so persisting calibration cannot cause a reload loop.
             self._hass.config_entries.async_update_entry(
                 self._entry, options={**self._entry.options, CONF_BASELINES: merged}
             )
