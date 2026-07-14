@@ -106,6 +106,15 @@ class Plan:
         if not self.suppress_outputs:
             self.events.append(event)
 
+    def emit_control(self, event: EmittedEvent) -> None:
+        """Emit an operator-requested control-plane outcome even while
+        presence publication is disabled (rule 7.2).
+
+        RecordBaseline can commit and persist while disabled, so its
+        success/rejection result must not disappear with PassBy events.
+        """
+        self.events.append(event)
+
     def start_timer(self, key: str, delay: float) -> None:
         # Starting a pending key restarts it (adapter contract).
         self._pending.add(key)

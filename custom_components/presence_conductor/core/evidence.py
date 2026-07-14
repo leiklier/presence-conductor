@@ -282,6 +282,7 @@ def apply_frame(engine: ConductorEngine, frame: SensorFrame, now: float) -> None
     if frame.still_obs != sensor.still_obs:
         sensor.still_obs = frame.still_obs
         sensor.still_obs_at = now
+    sensor.frame_obs = frame.frame_obs
     sensor.move_energy_fresh = frame.move_energy_obs != sensor.move_energy_obs  # 4.2
     sensor.move_energy_obs = frame.move_energy_obs
     energies = ingest_frame(engine, frame, now)
@@ -408,10 +409,12 @@ def collect_baseline_rows(engine: ConductorEngine) -> None:
                 # 3.1/3.7: held/deduplicated rows repeat one measurement.
                 move_fresh=sensor.move_obs != recording.last_move_obs,
                 still_fresh=sensor.still_obs != recording.last_still_obs,
+                frame_fresh=sensor.frame_obs != recording.last_frame_obs,
             )
         )
         recording.last_move_obs = sensor.move_obs
         recording.last_still_obs = sensor.still_obs
+        recording.last_frame_obs = sensor.frame_obs
 
 
 def on_record_baseline(
@@ -430,7 +433,14 @@ def on_record_baseline(
     if zone is None:  # unknown zone: ignore
         return
     zst = engine.state.zones[zone.zone_id]
-    zst.recording = BaselineRecording()
+    sensor = engine.state.sensors[zone.sensor_id]
+    # Start from the counters already adopted by the engine. The first tick
+    # is fresh only if a post-command observation actually arrived.
+    zst.recording = BaselineRecording(
+        last_move_obs=sensor.move_obs,
+        last_still_obs=sensor.still_obs,
+        last_frame_obs=sensor.frame_obs,
+    )
     zst.lam = engine.lam_prior  # 3.3: pinned at the empty prior
     zst.occupied = False
     zst.activity = Activity.EMPTY  # 3.3: no pass_by on this transition
@@ -447,6 +457,7 @@ def on_record_baseline(
     zst.attack_candidate = False  # 4.2: chain cleared
     zst.attack_count = 0
     zst.attack_last = None
+    zst.attack_path = None
     duration = event.duration
     if duration is None:
         duration = engine.config.tunables.baseline_duration  # 3.3: default 300 s
@@ -503,29 +514,34 @@ def _stat_of(raws: list[float], m: int, t: Tunables) -> StatBaseline | None:
 
 
 def _assess_channel(
-    column: list[float], fresh: int, ucb_z: float, t: Tunables
+    column: list[float], fresh: int, observed: int, ucb_z: float, t: Tunables
 ) -> tuple[ChannelStats | None, ChannelCoverage]:
     """Candidate floor + coverage verdict for one aggregate channel (3.1,
     3.3). Touches no zone state — the commit is the caller's decision."""
     if not column:
-        return None, ChannelCoverage(Coverage.NO_DATA, 0, 0, 0)
+        return None, ChannelCoverage(Coverage.NO_DATA, 0, 0, 0, observed=observed)
     samples = _distinct(column)  # 3.1: held repeats carry no information
     counts = (len(column), fresh, len(samples))
     if len(samples) >= t.stat_min_rows and fresh >= t.stat_min_rows:
         floor = ChannelStats(*robust_stats(samples, t.sigma_min, t.energy_quantum, ucb_z))
-        return floor, ChannelCoverage(Coverage.CALIBRATED, *counts)
-    if len(column) >= t.stat_min_rows and max(samples) - min(samples) <= t.energy_quantum:
-        # 3.1/3.3: quiescent channel — the empty signal simply never moves;
-        # no scale can or need be estimated beyond the floors.
+        return floor, ChannelCoverage(Coverage.CALIBRATED, *counts, observed=observed)
+    if (
+        len(column) >= t.stat_min_rows
+        and observed >= t.stat_min_rows
+        and max(samples) - min(samples) <= t.energy_quantum
+    ):
+        # 3.1/3.3: a quiescent result needs real sensor observations too.
+        # Tick rows alone only repeat a cache and cannot certify a plateau.
         return (
             ChannelStats(median(samples), t.sigma_min),
-            ChannelCoverage(Coverage.QUIESCENT, *counts),
+            ChannelCoverage(Coverage.QUIESCENT, *counts, observed=observed),
         )
     reason = (
-        f"{fresh} fresh / {len(samples)} distinct observations over "
+        f"{fresh} channel-fresh / {observed} sensor-observed / "
+        f"{len(samples)} distinct observations over "
         f"{len(column)} rows; need {t.stat_min_rows} — record longer"
     )
-    return None, ChannelCoverage(Coverage.REJECTED, *counts, reason=reason)
+    return None, ChannelCoverage(Coverage.REJECTED, *counts, observed=observed, reason=reason)
 
 
 def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Plan) -> None:
@@ -546,6 +562,7 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
     # 3.7: statistics over fresh rows only — held rows repeat measurements.
     move_rows = [row for row in rows if row.move_fresh]
     still_rows = [row for row in rows if row.still_fresh]
+    observed = sum(row.frame_fresh for row in rows)
     coverage: dict[str, ChannelCoverage] = {}
     stat_candidates: dict[str, StatBaseline] = {}
 
@@ -563,7 +580,7 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
             sum(r.still_e is not None for r in still_rows),
         ),
     ):
-        floor, cov = _assess_channel(column, fresh, _UCB_Z, t)
+        floor, cov = _assess_channel(column, fresh, observed, _UCB_Z, t)
         coverage[key] = cov
         if floor is not None:
             agg_floors[key] = floor
@@ -582,12 +599,12 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
     # ---- gate-path candidates (3.1 family-wise, 3.6, 3.7) --------------
     gate_z = stats.family_ucb_z(len(owned))  # 3.1: simultaneous coverage
     gate_floors: dict[str, dict[int, ChannelStats]] = {}
-    for key, fresh_rows, column_of, old_floors in (
-        ("move_gate", move_rows, lambda r: r.gate_move, zst.gate_move_baselines),
-        ("still_gate", still_rows, lambda r: r.gate_still, zst.gate_still_baselines),
+    for key, fresh_rows, column_of in (
+        ("move_gate", move_rows, lambda r: r.gate_move),
+        ("still_gate", still_rows, lambda r: r.gate_still),
     ):
         floors: dict[int, ChannelStats] = {}
-        all_quiescent = True
+        gate_statuses: dict[int, Coverage] = {}
         for index in owned:
             column = [
                 values[index]
@@ -596,72 +613,104 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
                 and index < len(values)
                 and values[index] is not None
             ]
-            if not column:
-                continue
-            samples = _distinct(column)
-            if len(samples) >= t.stat_min_rows:
-                floors[index] = ChannelStats(
-                    *robust_stats(samples, t.sigma_min, t.energy_quantum, gate_z)
-                )
-                all_quiescent = False
-            elif len(column) >= t.stat_min_rows and max(samples) - min(samples) <= (
-                t.energy_quantum
-            ):
-                floors[index] = ChannelStats(median(samples), t.sigma_min)
-            else:
-                all_quiescent = False  # a reporting gate we could not certify
-        gate_floors[key] = floors
+            gate_fresh = sum(
+                1
+                for row in fresh_rows
+                if (values := column_of(row)) is not None
+                and index < len(values)
+                and values[index] is not None
+            )
+            floor, gate_cov = _assess_channel(column, gate_fresh, observed, gate_z, t)
+            gate_statuses[index] = gate_cov.status
+            if floor is not None:
+                floors[index] = floor
         data_rows = sum(
             1
             for row in rows
             if (values := column_of(row)) is not None
             and any(i < len(values) and values[i] is not None for i in owned)
         )
-        # The statistic captures whatever floor mix will be in force (3.7).
-        merged = {**old_floors, **floors}
-        raws = [
-            s
-            for row in fresh_rows
-            if (s := gate_statistic(column_of(row), owned, merged, t)) is not None
-        ]
+        complete = bool(owned) and set(floors) == set(owned)
+        raws = (
+            [
+                s
+                for row in fresh_rows
+                if (s := gate_statistic(column_of(row), owned, floors, t)) is not None
+            ]
+            if complete
+            else []
+        )
         counts = (data_rows, len(raws), len(_distinct(raws)))
         if data_rows == 0:
-            coverage[key] = ChannelCoverage(Coverage.NO_DATA, 0, 0, 0)
+            coverage[key] = ChannelCoverage(Coverage.NO_DATA, 0, 0, 0, observed=observed)
+        elif not complete:
+            missing = [
+                i
+                for i in owned
+                if gate_statuses.get(i)
+                not in {
+                    Coverage.CALIBRATED,
+                    Coverage.QUIESCENT,
+                }
+            ]
+            coverage[key] = ChannelCoverage(
+                Coverage.REJECTED,
+                *counts,
+                observed=observed,
+                reason=f"owned gates without certified floors: {missing}",
+            )
         elif (stat := _stat_of(raws, len(owned), t)) is not None:
             stat_candidates[key] = stat
-            coverage[key] = ChannelCoverage(Coverage.CALIBRATED, *counts)
-        elif floors and all_quiescent and data_rows >= t.stat_min_rows:
-            coverage[key] = ChannelCoverage(Coverage.QUIESCENT, *counts)
+            gate_floors[key] = floors
+            coverage[key] = ChannelCoverage(Coverage.CALIBRATED, *counts, observed=observed)
+        elif gate_statuses and all(s is Coverage.QUIESCENT for s in gate_statuses.values()):
+            gate_floors[key] = floors
+            coverage[key] = ChannelCoverage(Coverage.QUIESCENT, *counts, observed=observed)
         else:
             reason = (
                 f"{len(raws)} fresh gate observations over {data_rows} rows; "
                 f"need {t.stat_min_rows} — record longer"
             )
-            coverage[key] = ChannelCoverage(Coverage.REJECTED, *counts, reason=reason)
+            coverage[key] = ChannelCoverage(
+                Coverage.REJECTED, *counts, observed=observed, reason=reason
+            )
 
     # ---- atomic commit (3.3) -------------------------------------------
     required = ["move_agg", "still_agg"]
+    sensor = engine.state.sensors[zone.sensor_id]
     if t.use_gate_evidence and owned:
-        required += ["move_gate", "still_gate"]  # 2.6: opt-in production path
-    rejected = any(coverage[key].status is Coverage.REJECTED for key in required)
-    materialized = any(
-        cov.status in (Coverage.CALIBRATED, Coverage.QUIESCENT) for cov in coverage.values()
-    )
-    success = not rejected and materialized
+        # Gate entities that have ever been configured leave a tuple cache,
+        # even if engineering mode currently reports every value unknown.
+        if sensor.last_gate_move is not None:
+            required.append("move_gate")
+        if sensor.last_gate_still is not None:
+            required.append("still_gate")
+    accepted = {Coverage.CALIBRATED, Coverage.QUIESCENT}
+    success = all(coverage[key].status in accepted for key in required)
     if success:
         if (floor := agg_floors.get("move_agg")) is not None:
             zst.move_baseline = floor
         if (floor := agg_floors.get("still_agg")) is not None:
             zst.still_baseline = floor
-        zst.gate_move_baselines.update(gate_floors["move_gate"])  # 3.6
-        zst.gate_still_baselines.update(gate_floors["still_gate"])
-        # 3.7 full replace: paths without an accepted empirical statistic
-        # fall back to the analytic values.
-        zst.stat_cal = stat_candidates
+        # Optional families are path-atomic: rejected/no-data candidates
+        # leave every old floor and statistic untouched.
+        if coverage["move_gate"].status in accepted:
+            zst.gate_move_baselines = gate_floors["move_gate"]
+        if coverage["still_gate"].status in accepted:
+            zst.gate_still_baselines = gate_floors["still_gate"]
+        new_stats = dict(zst.stat_cal)
+        for key in ("move_agg", "still_agg", "move_gate", "still_gate"):
+            if key in ("move_gate", "still_gate") and coverage[key].status not in accepted:
+                continue  # preserve an optional family that did not commit
+            if (stat := stat_candidates.get(key)) is not None:
+                new_stats[key] = stat
+            else:
+                new_stats.pop(key, None)  # accepted quiescent -> analytic fallback
+        zst.stat_cal = new_stats
         zst.last_adapt_at = None  # new floor: re-anchor the adaptation EMA
         # 3.3: baselines persist in the config entry (adapter saves them).
         plan.persist_calibration = True
-    plan.emit(
+    plan.emit_control(
         BaselineRecorded(
             zone_id=zone.zone_id,
             move_mu=zst.move_baseline.mu,

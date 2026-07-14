@@ -233,6 +233,7 @@ class _SensorShadow:
         #: Observation clock (rule 1.1), advanced per recorded entity change.
         self.move_obs = 0
         self.still_obs = 0
+        self.frame_obs = 0
         self.move_energy_obs = 0
 
     def set_gate(self, role: str, value: float | None) -> None:
@@ -273,6 +274,7 @@ class _SensorShadow:
             gate_still=None if gate_still is None else tuple(gate_still),
             move_obs=self.move_obs,
             still_obs=self.still_obs,
+            frame_obs=self.frame_obs,
             move_energy_obs=self.move_energy_obs,
         )
 
@@ -379,6 +381,7 @@ def replay(
         shadow = shadows[sensor_id]
         parseable, value = _parse_state(role, state)
         if parseable:
+            shadow.frame_obs += 1
             # 1.1 observation clock: every recorded change of a channel's
             # entity is one reported measurement — valid under the verified
             # firmware guarantee (atomic radar frames, throttle-only

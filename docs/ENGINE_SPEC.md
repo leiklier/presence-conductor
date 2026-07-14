@@ -202,8 +202,11 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   **distinct observations** —
   consecutive duplicate values are collapsed first, because
   held/deduplicated rows repeat one measurement and a rank bound computed
-  over repeats overstates its confidence. A channel whose distinct samples span at most one quantum is
-  *quiescent* and calibrates to `(value, sigma_min)` directly; a channel
+  over repeats overstates its confidence. A channel whose distinct samples
+  span at most one quantum is *quiescent* only when at least
+  `stat_min_rows` tick intervals were certified by real sensor-frame
+  observations, and calibrates to `(value, sigma_min)` directly; ticks
+  repeating a silent sensor cache do **not** certify quiescence. A channel
   with fewer than `stat_min_rows` distinct samples that is not quiescent
   keeps its previous floor — re-run with a longer `duration` instead.
   Stated assumptions (this is **not** distribution-free end to end): the
@@ -279,24 +282,35 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   paths (`move_agg`/`still_agg`/`move_gate`/`still_gate`) is classified:
   `calibrated` (enough distinct observations for a floor and enough fresh
   rows for a statistic), `quiescent` (the channel's values span at most
-  one quantum over at least `stat_min_rows` rows — the empty signal
+  one quantum over at least `stat_min_rows` sensor-observed rows — the empty signal
   simply never moves; floor `(median, sigma_min)`, analytic statistic —
   accepted and *reported as such*), `no_data` (the channel never reported
   during the window; nothing to calibrate, previous values kept), or
   `rejected` (data present but too few fresh/distinct observations, with
   the counts as the reason). **Required paths** are the aggregates plus,
-  iff `use_gate_evidence` is on and the zone owns gates, the gate paths.
-  The commit is **atomic**: if any required path is `rejected`, *nothing*
+  iff `use_gate_evidence` is on and the sensor has configured gate entities,
+  each configured gate channel (`move_gate` and/or `still_gate`).
+  A gate path is one atomic family: every owned gate that may participate
+  at runtime must have a certified candidate floor. Missing/insufficient
+  gates reject that family; when it is optional, all of its previous
+  floors and statistic survive unchanged rather than accepting a partial
+  max distribution.
+  The commit is **atomic**: unless every required path is `calibrated` or
+  validly `quiescent`, *nothing*
   is applied — the previous floors and the previous statistic calibration
   survive untouched, nothing is persisted, and the outcome reports
   failure. A rejected window must never silently clear a valid
   calibration or half-apply one. Only a committed window persists.
   **Observability:** every window close emits `BaselineRecorded` with
-  `success`, the per-path coverage (status, row/fresh/distinct counts,
+  `success`, the per-path coverage
+  (status, row/fresh/distinct/sensor-observed counts,
   rejection reason) and the committed floors; the adapter surfaces it as
   a Home Assistant event and a per-zone diagnostic event entity, and logs
   rejections as warnings — the calibration button must never look
-  successful when a required channel was not calibrated.
+  successful when a required channel was not calibrated. Calibration is
+  an operator-requested control-plane action, so this outcome remains
+  visible while presence outputs are disabled; occupancy and pass-by
+  publication remain suppressed.
   **Lifecycle:** while the window is open the zone's estimator is
   **suspended** — the operator has asserted emptiness, so scoring the
   incoming frames against the old (possibly wrong) floors would let the
@@ -434,8 +448,12 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   these are the raw tunables: `g = attack_gap_min` (default 0.3 s),
   `G = attack_gap_max` (default 3 s). When the path in force carries a
   **calibrated dependence estimate** `τ̂ > 1` (3.7), the spacing scales
-  with it: `g = max(attack_gap_min, τ̂)` and
-  `G = attack_gap_max · g / attack_gap_min`. Rationale: confirmation is
+  with it: `g = max(attack_gap_min, τ̂)` and the original configured
+  window width is preserved, `G = g + max(0, attack_gap_max −
+  attack_gap_min)`. The core defensively applies a small positive spacing
+  to legacy configurations that stored `attack_gap_min = 0`; that floor is
+  0.1 s, matching the current UI minimum and keeping a millisecond entity
+  flurry from one radar packet to one confirmation. Rationale: confirmation is
   meant to *square* the per-observation tail, which requires the
   confirming observations to be approximately independent under H0. For
   AR(1) empty noise the correlation at spacing `s` is `ρ^s` and
@@ -447,7 +465,10 @@ never drift a zone toward occupied, regardless of how many gates it owns.
   is honest latency: in a room whose *empty* noise is that dependent,
   the information rate is genuinely ~τ̂ times lower. Field-calibrated
   aggregate move channels are quiescent when empty (`τ̂ = 1`), so
-  production entry latency is unchanged. *Fresh* means the frame's
+  production entry latency is unchanged. A confirmation chain is bound
+  to the evidence path that started it: a gate-path candidate and an
+  aggregate-path candidate can never confirm one another, and any path
+  switch resets the chain. *Fresh* means the frame's
   `move_energy_obs` counter (1.1) advanced — a new move-energy or
   gate-move measurement was actually reported. The adapter re-emits its complete cached frame on
   **any** entity change, so an unrelated update (a still-energy

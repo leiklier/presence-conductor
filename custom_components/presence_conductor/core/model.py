@@ -245,6 +245,10 @@ class BaselineRow:
     #: measurement and are excluded from the statistics.
     move_fresh: bool = True
     still_fresh: bool = True
+    #: Whether any supported entity from this sensor was observed since
+    #: the previous tick-aligned row. Unlike the row itself, this proves
+    #: that the cached plateau was re-observed rather than merely held.
+    frame_fresh: bool = True
 
 
 #: Calibration coverage statuses (rule 3.3).
@@ -255,11 +259,12 @@ class Coverage(StrEnum):
     #: statistic: the path's calibration is in the committed candidate.
     CALIBRATED = "calibrated"
     #: The channel's values span at most one quantum: the empty signal
-    #: never moves. Floor ``(median, sigma_min)``, analytic statistic.
+    #: never moves over enough certified sensor observations. Floor
+    #: ``(median, sigma_min)``, analytic statistic.
     QUIESCENT = "quiescent"
     #: The channel never reported during the window: nothing to calibrate,
-    #: previous values kept. Never blocks the commit (a test rig or an
-    #: unconfigured path, not a coverage failure).
+    #: previous values kept. Optional paths preserve their old family;
+    #: required paths cannot commit with no data.
     NO_DATA = "no_data"
     #: Data present but too few fresh/distinct observations: blocks the
     #: whole commit when the path is required.
@@ -278,6 +283,9 @@ class ChannelCoverage:
     fresh: int
     #: Distinct observations after collapsing consecutive duplicates (3.1).
     distinct: int
+    #: Tick rows certified by at least one real sensor-frame observation
+    #: during the row interval (3.3). Ticks alone never increment this.
+    observed: int = 0
     #: Human-readable rejection reason; ``None`` unless REJECTED.
     reason: str | None = None
 
@@ -294,8 +302,9 @@ class BaselineRecording:
 
     rows: list[BaselineRow] = field(default_factory=list)
     #: Observation counters at the previous row, for freshness tagging.
-    last_move_obs: int | None = None
-    last_still_obs: int | None = None
+    last_move_obs: int = 0
+    last_still_obs: int = 0
+    last_frame_obs: int = 0
 
 
 @dataclass(slots=True)
@@ -352,6 +361,9 @@ class ZoneState:
     #: observations counted so far, and when the last one arrived.
     attack_count: int = 0
     attack_last: float | None = None
+    #: Evidence path that started the current confirmation chain. Gate and
+    #: aggregate tail events may not confirm one another (rule 4.2).
+    attack_path: str | None = None
     # -- activity FSM internals (rule 5) --------------------------------
     occupied_since: float | None = None
     peak_confidence: float = 0.0
@@ -391,6 +403,7 @@ class SensorState:
     #: move-energy freshness flag (4.2).
     move_obs: int = 0
     still_obs: int = 0
+    frame_obs: int = 0
     move_energy_obs: int = 0
     move_obs_at: float | None = None
     still_obs_at: float | None = None

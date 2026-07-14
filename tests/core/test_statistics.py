@@ -63,13 +63,13 @@ def _noisy_energy(rng: random.Random) -> float:
     return float(max(0, min(100, round(rng.gauss(NOISE_MU, NOISE_SIGMA)))))
 
 
-def _gate_zone_config(far_cm: float) -> ConductorConfig:
+def _gate_zone_config(far_cm: float, **tunable_overrides: float) -> ConductorConfig:
     """One sensor, one zone owning the gates that cover ``[0, far_cm]``."""
     return ConductorConfig(
         sensors=(SensorConfig(KONTOR, "Kontor"),),
         zones=(ZoneConfig("z", "Z", KONTOR, room_id="r", near_cm=0, far_cm=far_cm),),
         rooms=(RoomConfig("r", "R"),),
-        tunables=Tunables(use_gate_evidence=True),  # 2.6: gate tests opt in
+        tunables=Tunables(use_gate_evidence=True, **tunable_overrides),  # 2.6: gate tests opt in
     )
 
 
@@ -95,6 +95,8 @@ def test_calibrated_empty_gate_noise_never_occupies(far_cm: float) -> None:
     for _ in range(121):
         h.send_frame(
             KONTOR,
+            move_e=5.0,
+            still_e=5.0,
             gate_move=_noise_tuple(rng, owned),
             gate_still=_noise_tuple(rng, owned),
         )
@@ -108,6 +110,8 @@ def test_calibrated_empty_gate_noise_never_occupies(far_cm: float) -> None:
     for second in range(900):
         h.send_frame(
             KONTOR,
+            move_e=5.0,
+            still_e=5.0,
             gate_move=_noise_tuple(rng, owned),
             gate_still=_noise_tuple(rng, owned),
         )
@@ -135,6 +139,8 @@ def test_analytic_fallback_empty_gate_noise_never_occupies() -> None:
     for second in range(900):
         h.send_frame(
             KONTOR,
+            move_e=5.0,
+            still_e=5.0,
             gate_move=_noise_tuple(rng, owned),
             gate_still=_noise_tuple(rng, owned),
         )
@@ -183,6 +189,8 @@ def test_review_seeds_stay_empty_for_an_hour(seed: int, far_cm: float) -> None:
     for _ in range(121):
         h.send_frame(
             KONTOR,
+            move_e=5.0,
+            still_e=5.0,
             gate_move=_noise_tuple(rng, owned),
             gate_still=_noise_tuple(rng, owned),
         )
@@ -232,6 +240,8 @@ def test_round3_seeds_with_uncalibrated_scale_noise(
     for _ in range(121):
         h.send_frame(
             KONTOR,
+            move_e=5.0,
+            still_e=5.0,
             gate_move=_tuple_at(rng, owned, mu, sigma),
             gate_still=_tuple_at(rng, owned, mu, sigma),
         )
@@ -268,6 +278,8 @@ def test_calibration_cannot_manufacture_occupancy() -> None:
     for _ in range(121):
         h.send_frame(
             KONTOR,
+            move_e=5.0,
+            still_e=5.0,
             gate_move=_tuple_at(rng, owned, 20.0, 5.0),
             gate_still=_tuple_at(rng, owned, 20.0, 5.0),
         )
@@ -360,7 +372,7 @@ class TestRule38HeldAndCorrelatedNoise:
         h.submit(RecordBaseline("z", duration=120.0))
         for _ in range(121):
             m, st = draw()
-            h.send_frame(KONTOR, gate_move=m, gate_still=st)
+            h.send_frame(KONTOR, move_e=5.0, still_e=5.0, gate_move=m, gate_still=st)
             h.step_to(h.now + 1.0)
         if rho >= 0.9:
             # 3.7: the dependence was measured and discounts the rate.
@@ -403,7 +415,7 @@ class TestRule38HeldAndCorrelatedNoise:
         h.submit(RecordBaseline("z", duration=120.0))
         for _ in range(121):
             m, s = draw()
-            h.send_frame(KONTOR, gate_move=m, gate_still=s)
+            h.send_frame(KONTOR, move_e=5.0, still_e=5.0, gate_move=m, gate_still=s)
             h.step_to(h.now + 1.0)
         # 3.1 family-wise coverage: no gate floor underfits the true scale.
         assert min(f.sigma for f in zone.gate_move_baselines.values()) >= 0.05
@@ -439,7 +451,7 @@ class TestRule38HeldAndCorrelatedNoise:
         """Rule 4.2: per-gate entities update in a flurry from one radar
         frame; the spacing floor collapses the burst to one confirmation —
         nine fresh gate updates within milliseconds must not fire."""
-        config = _gate_zone_config(600.0)
+        config = _gate_zone_config(600.0, attack_gap_min=0.0)
         floors = {i: GateBaselines(0.20, 0.05, 0.20, 0.05) for i in range(9)}
         h = Harness(
             config,
@@ -458,6 +470,44 @@ class TestRule38HeldAndCorrelatedNoise:
         # The next radar interval is a distinct observation and confirms.
         h.send_frame(KONTOR, gate_move=gate_tuple({2: 70.0}, fill=None), at=start + 0.4)
         assert zone.attack_count == 2
+        assert zone.occupied
+
+    def test_attack_confirmation_cannot_cross_evidence_paths(self) -> None:
+        """A gate tail event and an aggregate tail event have different
+        calibrations and may not confirm one another."""
+        config = _gate_zone_config(40.0)
+        floors = {i: GateBaselines(0.20, 0.05, 0.20, 0.05) for i in range(9)}
+        h = Harness(
+            config,
+            InitialSnapshot(baselines={"z": ZoneBaselines(0.20, 0.05, 0.20, 0.05, gates=floors)}),
+        )
+        zone = h.zone("z")
+        zone.stat_cal["move_gate"] = StatBaseline(STAT_M0, STAT_S0, 0.0, tau=6.0)
+
+        h.send_frame(KONTOR, gate_move=gate_tuple({0: 60.0}, fill=None))
+        assert zone.attack_count == 1
+        assert zone.attack_path == "move_gate"
+        h.send_frame(
+            KONTOR,
+            move_d=100.0,
+            move_e=60.0,
+            moving=True,
+            gate_move=None,
+            at=h.now + 1.0,
+        )
+        assert zone.attack_count <= 1
+        assert zone.attack_path in (None, "move_agg")
+        assert not zone.occupied
+
+    def test_zero_configured_attack_gap_is_total_with_calibrated_tau(self) -> None:
+        """The options UI historically allowed zero; a tau-scaled chain
+        must remain safe and must not divide by zero."""
+        config = make_config(attack_gap_min=0.0)
+        h = Harness(config, make_snapshot(config))
+        zone = h.zone(DESK)
+        zone.stat_cal["move_agg"] = StatBaseline(STAT_M0, STAT_S0, 0.0, tau=6.0)
+        h.send_frame(KONTOR, move_d=100.0, move_e=35.0, moving=True)
+        h.send_frame(KONTOR, move_d=100.0, move_e=36.0, moving=True, at=h.now + 6.0)
         assert zone.occupied
 
     def test_held_calibration_rows_do_not_overstate_confidence(self) -> None:
@@ -491,6 +541,8 @@ class TestRule37Shrinkage:
         for _ in range(121):
             h.send_frame(
                 KONTOR,
+                move_e=5.0,
+                still_e=5.0,
                 gate_move=gate_tuple(dict.fromkeys(owned, 5.0), fill=None),
                 gate_still=gate_tuple(dict.fromkeys(owned, 5.0), fill=None),
             )

@@ -170,6 +170,7 @@ def _baseline_payload(event: BaselineRecorded) -> dict[str, Any]:
                 "rows": cov.rows,
                 "fresh": cov.fresh,
                 "distinct": cov.distinct,
+                "observed": cov.observed,
                 **({"reason": cov.reason} if cov.reason else {}),
             }
             for key, cov in event.coverage.items()
@@ -221,10 +222,15 @@ class _SensorView:
     #: the verified firmware guarantee on the role sets above).
     move_obs: int = 0
     still_obs: int = 0
+    #: Sensor-wide observation epoch used only to certify calibration
+    #: plateaus. Every subscribed entity event advances it; ticks do not.
+    frame_obs: int = 0
     move_energy_obs: int = 0
 
     def update(self, role: str, state: State | None) -> None:
         """Fold one entity state into the view."""
+        if state is not None and state.state not in UNAVAILABLE_STATES:
+            self.frame_obs += 1
         if role in _MOVE_ROLES:
             self.move_obs += 1
         if role in _STILL_ROLES:
@@ -274,6 +280,7 @@ class _SensorView:
             gate_still=None if self.gate_still is None else tuple(self.gate_still),
             move_obs=self.move_obs,
             still_obs=self.still_obs,
+            frame_obs=self.frame_obs,
             move_energy_obs=self.move_energy_obs,
         )
 

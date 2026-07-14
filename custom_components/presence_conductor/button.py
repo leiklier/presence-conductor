@@ -1,7 +1,7 @@
 """Per-zone baseline calibration buttons (spec rule 3.3).
 
 Pressing a button opens a RecordBaseline window with the default duration
-(``Tunables.baseline_duration``, 120 s); the operator asserts the zone is
+(``Tunables.baseline_duration``, 300 s); the operator asserts the zone is
 empty for the window. The ``presence_conductor.record_baseline`` service is
 the parameterized alternative (custom duration).
 """

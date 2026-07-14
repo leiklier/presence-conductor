@@ -87,7 +87,7 @@ _TUNABLE_UI: dict[str, tuple[float, float, float, str | None]] = {
     "p_prior": (0.001, 0.5, 0.001, None),
     "attack_tail_ppm": (1, 10000, 1, "ppm"),
     "attack_confirm": (1, 5, 1, None),
-    "attack_gap_min": (0, 5, 0.1, "s"),
+    "attack_gap_min": (0.1, 5, 0.1, "s"),
     "attack_gap_max": (0.5, 10, 0.1, "s"),
     "p_attack": (0.5, 0.999, 0.001, None),
     "theta_on": (0.5, 0.999, 0.01, None),

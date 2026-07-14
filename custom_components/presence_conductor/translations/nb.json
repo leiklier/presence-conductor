@@ -315,7 +315,7 @@
         },
         "duration": {
           "name": "Varighet",
-          "description": "Innsamlingsvindu i sekunder. Standard er justeringsverdien 'Grunnlinjevarighet' (120 s)."
+          "description": "Innsamlingsvindu i sekunder. Standard er justeringsverdien 'Grunnlinjevarighet' (300 s). Resultatet — lagret eller avvist med dekning per kanal — vises på sonens kalibreringshendelse og presence_conductor_baseline_recorded-busshendelsen."
         }
       }
     }

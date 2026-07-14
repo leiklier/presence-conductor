@@ -159,6 +159,7 @@ async def test_engine_started_with_monotonic_now(hass: HomeAssistant, monkeypatc
         still_energy=2.0,
         move_obs=frame.move_obs,
         still_obs=frame.still_obs,
+        frame_obs=frame.frame_obs,
         move_energy_obs=frame.move_energy_obs,
     )
     assert fake.snapshot.baselines["sofakrok"].still_mu == 0.3
@@ -191,6 +192,7 @@ async def test_any_entity_change_produces_complete_frame(hass: HomeAssistant, mo
         still_energy=2.0,
         move_obs=frame.move_obs,
         still_obs=frame.still_obs,
+        frame_obs=frame.frame_obs,
         move_energy_obs=frame.move_energy_obs,
     )
     first_move_obs = frame.move_obs
@@ -217,6 +219,7 @@ async def test_any_entity_change_produces_complete_frame(hass: HomeAssistant, mo
         has_moving_target=True,
         move_obs=frame.move_obs,
         still_obs=frame.still_obs,
+        frame_obs=frame.frame_obs,
         move_energy_obs=frame.move_energy_obs,
     )
 

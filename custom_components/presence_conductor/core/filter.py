@@ -109,6 +109,14 @@ def on_frame(engine: ConductorEngine, frame: SensorFrame, now: float, plan: Plan
         zst = engine.state.zones[zone.zone_id]
         if zst.recording is not None:
             continue  # 3.3: suspended while calibrating
+        path = "move_gate" if zst.move_from_gates else "move_agg"
+        if zst.attack_path is not None and zst.attack_path != path:
+            # A different evidence path has a different floor, tail and
+            # dependence calibration. It cannot confirm the old chain —
+            # even when this path switch arrived on a non-energy frame.
+            zst.attack_count = 0
+            zst.attack_last = None
+            zst.attack_path = None
         # 4.2: strong move evidence floors the belief immediately - not
         # waiting for the next tick - once *confirmed*: attack_confirm
         # FRESH move observations, each past the analytic tail threshold
@@ -125,14 +133,19 @@ def on_frame(engine: ConductorEngine, frame: SensorFrame, now: float, plan: Plan
                 # rho^tau ~ e^-2, while 1 s-spaced exceedances at rho=0.9
                 # are essentially one tail event. tau = 1 (analytic
                 # fallback / measured independent) keeps the raw tunables.
-                path = "move_gate" if zst.move_from_gates else "move_agg"
                 tau = cal.tau if (cal := zst.stat_cal.get(path)) is not None else 1.0
-                gap_min = max(t.attack_gap_min, tau) if tau > 1.0 else t.attack_gap_min
-                gap_max = t.attack_gap_max * (gap_min / t.attack_gap_min)
+                # The UI historically permitted attack_gap_min=0. Keep the
+                # core total and prevent same-burst confirmation regardless;
+                # preserve the configured window width when tau moves it.
+                configured_min = max(0.1, t.attack_gap_min)
+                gap_min = max(configured_min, tau) if tau > 1.0 else configured_min
+                gap_width = max(0.0, t.attack_gap_max - configured_min)
+                gap_max = gap_min + gap_width
                 last = zst.attack_last
                 if last is None or now - last > gap_max:
                     zst.attack_count = 1  # 4.2: chain (re)starts
                     zst.attack_last = now
+                    zst.attack_path = path
                 # 1 µs absorbs float noise in the gap arithmetic: monotonic
                 # timestamps are large, and a 0.3 s difference can land
                 # just under 0.3 in binary floats.
@@ -147,6 +160,7 @@ def on_frame(engine: ConductorEngine, frame: SensorFrame, now: float, plan: Plan
             else:
                 zst.attack_count = 0  # 4.2: fresh non-qualifying resets
                 zst.attack_last = None
+                zst.attack_path = None
         # 4.4: gated, undamped fast channel. Under gate precedence (2.6) the
         # sensor-global has_moving_target flag is not zone evidence - the
         # owned gates already say where the mover is.

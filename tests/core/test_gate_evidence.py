@@ -11,6 +11,7 @@ from custom_components.presence_conductor.core.model import (
     ConductorConfig,
     GateBaselines,
     SensorConfig,
+    StatBaseline,
     Tunables,
     ZoneConfig,
 )
@@ -209,8 +210,10 @@ class TestRule36PerGateFloors:
         for value in raw:
             h.send_frame(
                 KONTOR,
-                gate_move=gate_tuple({1: value, 2: None}),
-                gate_still=gate_tuple({1: value, 2: None}),
+                move_e=5.0,
+                still_e=5.0,
+                gate_move=gate_tuple({1: value, 2: value}),
+                gate_still=gate_tuple({1: value, 2: value}),
             )
             h.step_to(h.now + 1.0)
         h.run(5)  # window closes at t=80 during this run
@@ -221,10 +224,61 @@ class TestRule36PerGateFloors:
         # times 1.4826.
         assert desk.gate_move_baselines[1].sigma == pytest.approx(1.4826 * 0.025, abs=0.002)
         assert desk.gate_still_baselines[1].mu == pytest.approx(0.10, abs=0.011)
-        # Gate 2 reported nothing during the window: previous floor kept.
-        assert desk.gate_move_baselines[2].mu == pytest.approx(MU)
-        assert desk.gate_move_baselines[2].sigma == pytest.approx(SIGMA)
+        # Every owned gate belongs to the same atomic calibration family.
+        assert desk.gate_move_baselines[2].mu == pytest.approx(0.10, abs=0.011)
         assert h.persist_count == 1  # 3.3: baselines persist in the config entry
+
+    def test_rejected_optional_gate_family_preserves_every_old_value(self) -> None:
+        """Aggregate calibration may commit while gates are disabled, but
+        a partial optional gate family is an all-or-nothing no-op."""
+        config = make_config(use_gate_evidence=False)
+        snapshot = make_snapshot(config, gate_floors=calibrated_gate_floors(config))
+        h = Harness(config, snapshot)
+        desk = h.zone(DESK)
+        desk.stat_cal["move_gate"] = StatBaseline(0.4, 0.6, 0.0, 2.0)
+        old_floors = {
+            index: (floor.mu, floor.sigma) for index, floor in desk.gate_move_baselines.items()
+        }
+        old_stat = desk.stat_cal["move_gate"]
+
+        h.submit(RecordBaseline(DESK, duration=70.0))
+        for value in [8, 9, 10, 11, 12] * 14:
+            # Gate 2 is owned but never reports: the move-gate family is
+            # rejected even though gate 1 alone has ample coverage.
+            h.send_frame(
+                KONTOR,
+                move_e=5.0,
+                still_e=5.0,
+                gate_move=gate_tuple({1: value, 2: None}),
+                gate_still=gate_tuple({1: value, 2: None}),
+            )
+            h.step_to(h.now + 1.0)
+
+        (event,) = h.baseline_events()
+        assert event.success is True  # aggregate family committed
+        assert event.coverage["move_gate"].status.value == "rejected"
+        assert {
+            index: (floor.mu, floor.sigma) for index, floor in desk.gate_move_baselines.items()
+        } == old_floors
+        assert desk.stat_cal["move_gate"] == old_stat
+
+    def test_gate_enabled_no_data_rejects_atomic_commit(self) -> None:
+        """A configured gate tuple that goes entirely unknown is NO_DATA,
+        which is failure when gate evidence is enabled."""
+        h = make_harness()
+        h.submit(RecordBaseline(DESK, duration=70.0))
+        for _ in range(70):
+            h.send_frame(
+                KONTOR,
+                gate_move=gate_tuple({0: None, 1: None, 2: None}),
+                gate_still=gate_tuple({0: None, 1: None, 2: None}),
+            )
+            h.step_to(h.now + 1.0)
+
+        (event,) = h.baseline_events()
+        assert event.success is False
+        assert event.coverage["move_gate"].status.value == "no_data"
+        assert h.persist_count == 0
 
     def test_rule_3_6_adaptation_extends_per_gate_for_owned_gates(self) -> None:
         config = make_config(use_gate_evidence=True, t_background=60.0, tau_background=600.0)

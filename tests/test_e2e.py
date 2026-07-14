@@ -438,6 +438,38 @@ async def test_record_baseline_rejection_is_visible_and_atomic(
     assert outcome.attributes["event_type"] == "rejected"
 
 
+async def test_disabled_baseline_outcome_remains_visible(hass: HomeAssistant, freezer) -> None:
+    """Rule 7.2: presence events stay suppressed while disabled, but an
+    operator-requested calibration outcome is control-plane feedback."""
+    entry, _controller = await setup_e2e(
+        hass, options={**OPTIONS, "tunables": {"stat_min_rows": 2}}
+    )
+    captured = async_capture_events(hass, EVENT_BASELINE_RECORDED)
+    await hass.services.async_call(
+        "switch", "turn_off", {"entity_id": ENABLED_SWITCH}, blocking=True
+    )
+    await hass.services.async_call(
+        DOMAIN, "record_baseline", {"zone_id": "kjokken", "duration": 5}, blocking=True
+    )
+    for value in ("3.0", "4.0", "3.0", "4.0", "3.0"):
+        await set_states(
+            hass,
+            {
+                KJOKKEN["move_energy"]: value,
+                KJOKKEN["still_energy"]: value,
+            },
+        )
+        await advance(hass, freezer, 1.0)
+    await advance(hass, freezer, 0.5)
+
+    assert entry.options["baselines"]["kjokken"]["move_mu"] == pytest.approx(0.035)
+    assert len(captured) == 1
+    assert captured[0].data["success"] is True
+    outcome = hass.states.get("event.presence_conductor_kjokken_calibration")
+    assert outcome.attributes["event_type"] == "recorded"
+    assert hass.states.get(ENABLED_SWITCH).state == "off"
+
+
 async def test_disable_freezes_outputs_and_swallows_events(hass: HomeAssistant, freezer) -> None:
     """Rule 7.2: disabled = warm engine, frozen entities, no events."""
     _entry, controller = await setup_e2e(hass)
