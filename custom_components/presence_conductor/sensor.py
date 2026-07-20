@@ -2,12 +2,20 @@
 
 Activity is the consumer-facing split (rule 5.3): automations that must not
 react to walk-throughs key on ``active``/``settled`` instead of occupancy.
-Confidence and dwell are diagnostic surfaces; the diagnostics sensor
-mirrors the whole engine state at a glance.
+Confidence and dwell are diagnostic surfaces; the state sensor keeps a
+discrete engine summary at a glance.
+
+Recorder discipline: entity states and attributes only carry values that
+change at natural intervals — discrete transitions, whole-percent
+confidence steps, coarse dwell buckets. Per-frame numerics (lambdas,
+baselines, runtime evidence paths) live in the diagnostics download
+(``diagnostics.py``), never on entities, because every attribute change
+writes a recorder row regardless of recorder-side attribute exclusion.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -98,11 +106,15 @@ class ZoneActivitySensor(ZoneSensor):
 
 class ZoneConfidenceSensor(ZoneSensor):
     """Zone occupancy confidence (§0), as a percentage — a monotone
-    score, not a calibrated probability (rule 8.7)."""
+    score, not a calibrated probability (rule 8.7).
+
+    Whole percent: sub-percent wiggle would write a recorder row per
+    frame; long-term MEASUREMENT statistics keep the 5-minute trend.
+    """
 
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = PERCENTAGE
-    _attr_suggested_display_precision = 1
+    _attr_suggested_display_precision = 0
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_translation_key = "zone_confidence"
 
@@ -112,12 +124,19 @@ class ZoneConfidenceSensor(ZoneSensor):
         self._attr_name = f"{zone.name} confidence"
 
     @property
-    def native_value(self) -> float:
-        return round(self.zone_state.confidence * 100.0, 2)
+    def native_value(self) -> int:
+        return round(self.zone_state.confidence * 100.0)
+
+
+#: Dwell resolution in seconds: a per-tick counter would write a recorder
+#: row every second while occupied; 10 s buckets keep dwell thresholds
+#: useful (they fire at most one bucket late, never early — floor).
+DWELL_RESOLUTION = 10
 
 
 class ZoneDwellSensor(ZoneSensor):
-    """Continuous occupancy of the zone, in seconds (rule 5.4)."""
+    """Continuous occupancy of the zone, in seconds (rule 5.4),
+    quantized to :data:`DWELL_RESOLUTION` buckets."""
 
     _attr_device_class = SensorDeviceClass.DURATION
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -132,12 +151,18 @@ class ZoneDwellSensor(ZoneSensor):
         self._attr_name = f"{zone.name} dwell"
 
     @property
-    def native_value(self) -> float:
-        return round(self.zone_state.dwell_seconds, 1)
+    def native_value(self) -> int:
+        return math.floor(self.zone_state.dwell_seconds / DWELL_RESOLUTION) * DWELL_RESOLUTION
 
 
 class ZoneCalibrationStatusSensor(ConductorEntity, SensorEntity):
-    """Always-visible calibration provenance/readiness for one zone."""
+    """Always-visible calibration provenance/readiness for one zone.
+
+    Attributes carry stable provenance only: the per-frame runtime
+    evidence paths (gate/aggregate, empirical/analytic) flip with gate
+    readiness and would write a recorder row per flip — they live in the
+    diagnostics download instead.
+    """
 
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = CALIBRATION_OPTIONS
@@ -160,7 +185,7 @@ class ZoneCalibrationStatusSensor(ConductorEntity, SensorEntity):
         return {
             "zone_id": self._zone.zone_id,
             "room": self._zone.room_id,
-            **self.controller.calibration_diagnostic(self._zone.zone_id).attributes(),
+            **self.controller.calibration_diagnostic(self._zone.zone_id).provenance_attributes(),
         }
 
 
@@ -206,11 +231,11 @@ class RoomActivitySensor(RoomSensor):
 
 
 class RoomConfidenceSensor(RoomSensor):
-    """Maximum member confidence (rule 6.1), as a percentage."""
+    """Maximum member confidence (rule 6.1), as a whole percentage."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = PERCENTAGE
-    _attr_suggested_display_precision = 1
+    _attr_suggested_display_precision = 0
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_translation_key = "room_confidence"
 
@@ -224,17 +249,17 @@ class RoomConfidenceSensor(RoomSensor):
         return self.room_state.confidence is not None
 
     @property
-    def native_value(self) -> float | None:
+    def native_value(self) -> int | None:
         confidence = self.room_state.confidence
-        return round(confidence * 100.0, 2) if confidence is not None else None
+        return round(confidence * 100.0) if confidence is not None else None
 
 
 class HomeConfidenceSensor(ConductorEntity, SensorEntity):
-    """Home-level occupancy confidence (rule 6.5), as a percentage."""
+    """Home-level occupancy confidence (rule 6.5), as a whole percentage."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = PERCENTAGE
-    _attr_suggested_display_precision = 1
+    _attr_suggested_display_precision = 0
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_translation_key = "home_confidence"
     _attr_name = "Home confidence"
@@ -248,9 +273,9 @@ class HomeConfidenceSensor(ConductorEntity, SensorEntity):
         return self.engine_state.home_confidence is not None
 
     @property
-    def native_value(self) -> float | None:
+    def native_value(self) -> int | None:
         confidence = self.engine_state.home_confidence
-        return round(confidence * 100.0, 2) if confidence is not None else None
+        return round(confidence * 100.0) if confidence is not None else None
 
 
 class ConductorStateSensor(ConductorEntity, SensorEntity):
@@ -258,12 +283,19 @@ class ConductorStateSensor(ConductorEntity, SensorEntity):
 
     A control surface: refreshed on every plan, even while outputs are
     suppressed (rule 7.2) — diagnosing a disabled engine must stay possible.
+
+    Attributes are a discrete summary that only changes on real
+    transitions; the per-frame numerics (lambdas, confidences, baselines,
+    dwell) live in the diagnostics download. Even so, the summary
+    duplicates dedicated entities, so it is kept out of the recorder —
+    only the enabled/disabled state is stored.
     """
 
     _attr_name = "State"
     _attr_translation_key = "state"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _control_surface = True
+    _unrecorded_attributes = frozenset({"anyone_home", "zones", "rooms", "sensors"})
 
     def __init__(self, controller: PresenceConductorController) -> None:
         super().__init__(controller)
@@ -277,41 +309,21 @@ class ConductorStateSensor(ConductorEntity, SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         state = self.engine_state
         return {
-            "enabled": state.enabled,
-            "home_lambda": round(state.lam_home, 4),
-            "home_confidence": state.home_confidence,
             "anyone_home": state.anyone_home,
             "zones": {
                 zone_id: {
-                    "lambda": round(zst.lam, 4),
-                    "confidence": round(zst.confidence, 4),
                     "health": zst.health.value,
                     "activity": zst.activity.value,
                     "occupied": zst.occupied,
-                    "motion": zst.motion,
-                    "dwell_seconds": round(zst.dwell_seconds, 1),
-                    "move_baseline": [
-                        round(zst.move_baseline.mu, 4),
-                        round(zst.move_baseline.sigma, 4),
-                    ],
-                    "still_baseline": [
-                        round(zst.still_baseline.mu, 4),
-                        round(zst.still_baseline.sigma, 4),
-                    ],
-                    "calibration": {
-                        "status": self.controller.calibration_diagnostic(zone_id).status.value,
-                        **self.controller.calibration_diagnostic(zone_id).attributes(),
-                    },
+                    "calibration": self.controller.calibration_diagnostic(zone_id).status.value,
                 }
                 for zone_id, zst in state.zones.items()
             },
             "rooms": {
                 room_id: {
                     "occupied": room.occupied,
-                    "motion": room.motion,
                     "activity": room.activity.value if room.activity is not None else None,
                     "settled": room.settled,
-                    "confidence": room.confidence,
                 }
                 for room_id, room in state.rooms.items()
             },

@@ -62,10 +62,14 @@ Attributes explain the decision:
 
 - `reason_codes` and `reasons` identify missing or incompatible context;
 - `floor_source` is `recorded` or `default`;
-- `move_runtime` / `still_runtime` show the aggregate or gate path actually
-  used by the current frame;
-- `move_statistic` / `still_statistic` show empirical or analytic centering;
 - `action` gives the next operator step when one is required.
+
+The per-frame runtime paths — `move_runtime` / `still_runtime` (the
+aggregate or gate path actually used by the current frame) and
+`move_statistic` / `still_statistic` (empirical or analytic centering) —
+live in the config entry's diagnostics download, not on the entity: they
+can flip frame to frame, and every attribute change would write a
+recorder row.
 
 Any non-ready zone creates one nonpersistent Home Assistant Repairs warning for
 the config entry. It names every affected zone and disappears only when all are

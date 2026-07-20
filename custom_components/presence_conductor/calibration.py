@@ -85,13 +85,26 @@ class CalibrationDiagnostic:
             return None
         return "Keep the zone empty and record a new baseline (default 300 seconds)."
 
-    def attributes(self) -> dict[str, Any]:
-        """Return JSON-safe diagnostic entity attributes."""
+    def provenance_attributes(self) -> dict[str, Any]:
+        """Stable provenance for the calibration entity.
+
+        Changes only on calibration lifecycle transitions — safe for the
+        recorder. The per-frame runtime paths are deliberately absent:
+        ``move_from_gates`` flips frame to frame, and every attribute
+        change writes a recorder row.
+        """
         return {
             "reason_codes": list(self.reason_codes),
             "reasons": list(self.reasons),
             "action": self.action,
             "floor_source": self.floor_source,
+        }
+
+    def attributes(self) -> dict[str, Any]:
+        """Full JSON-safe dump, including the per-frame runtime paths —
+        for the diagnostics download, never for entity attributes."""
+        return {
+            **self.provenance_attributes(),
             "move_statistic": self.move_statistic,
             "still_statistic": self.still_statistic,
             "move_runtime": self.move_runtime,
