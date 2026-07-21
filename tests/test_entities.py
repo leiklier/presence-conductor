@@ -21,6 +21,7 @@ from custom_components.presence_conductor.const import DOMAIN
 from custom_components.presence_conductor.core.events import RecordBaseline, SetEnabled
 from custom_components.presence_conductor.core.model import Activity, Health, Tunables
 from custom_components.presence_conductor.core.stats import floor_calibration_fingerprint
+from custom_components.presence_conductor.sensor import ConductorStateSensor
 from tests.test_controller import KONTOR, OPTIONS, SOFAKROK, setup_conductor
 
 
@@ -133,7 +134,7 @@ async def test_zone_confidence_and_dwell(hass: HomeAssistant, monkeypatch) -> No
 
     assert float(hass.states.get(confidence).state) == pytest.approx(2.0)  # the prior
     assert hass.states.get(confidence).attributes["unit_of_measurement"] == "%"
-    assert hass.states.get(dwell).state == "0.0"
+    assert hass.states.get(dwell).state == "0"
     assert hass.states.get(dwell).attributes["unit_of_measurement"] == "s"
 
     fake.state.zones["sofakrok"].lam = 0.0  # p = 0.5
@@ -141,7 +142,9 @@ async def test_zone_confidence_and_dwell(hass: HomeAssistant, monkeypatch) -> No
     async_dispatcher_send(hass, controller.signal)
     await hass.async_block_till_done()
     assert float(hass.states.get(confidence).state) == pytest.approx(50.0)
-    assert hass.states.get(dwell).state == "12.3"
+    # Dwell is floored to 10 s buckets so the recorder only sees a row
+    # every bucket, not every tick.
+    assert hass.states.get(dwell).state == "10"
 
 
 async def test_diagnostic_and_config_entity_categories(hass: HomeAssistant, monkeypatch) -> None:
@@ -180,8 +183,10 @@ async def test_calibration_status_and_repairs_surface_startup_fallbacks(
     assert state.state == "recalibration_required"
     assert state.attributes["reason_codes"] == ["legacy_context"]
     assert state.attributes["floor_source"] == "recorded"
-    assert state.attributes["move_statistic"] == "analytic"
-    assert state.attributes["move_runtime"] == "aggregate"
+    # Per-frame runtime paths stay off the entity (recorder discipline);
+    # they are asserted through diagnostics in tests/test_diagnostics.py.
+    assert "move_statistic" not in state.attributes
+    assert "move_runtime" not in state.attributes
     assert "record a new baseline" in state.attributes["action"]
 
     uncalibrated = entity_id_for(
@@ -282,7 +287,6 @@ async def test_enabled_gate_path_without_gate_calibration_is_visible(
     assert "gate_move_calibration_missing" in state.attributes["reason_codes"]
     assert "gate_resolution_changed" in state.attributes["reason_codes"]
     assert "Gate resolution changed from 100 cm to 75 cm." in state.attributes["reasons"]
-    assert state.attributes["move_runtime"] == "aggregate"
 
 
 async def test_changed_floor_fit_settings_require_recalibration(
@@ -310,24 +314,25 @@ async def test_changed_floor_fit_settings_require_recalibration(
     assert state.attributes["floor_source"] == "default"
 
 
-async def test_runtime_source_tracks_gate_dropout_and_recovery(
+async def test_runtime_source_flips_stay_off_the_calibration_entity(
     hass: HomeAssistant, monkeypatch
 ) -> None:
+    """Per-frame gate dropout/recovery must not rewrite entity attributes —
+    that wrote a recorder row per flip. The runtime path is tracked through
+    diagnostics instead (tests/test_diagnostics.py)."""
     entry, controller, _fake = await setup_conductor(hass, monkeypatch)
     zone = controller.engine.state.zones["sofakrok"]
     calibration = entity_id_for(
         hass, "sensor", f"{entry.entry_id}_zone_sofakrok_calibration_status"
     )
 
+    before = hass.states.get(calibration)
     zone.move_from_gates = True
     async_dispatcher_send(hass, controller.signal_control)
     await hass.async_block_till_done()
-    assert hass.states.get(calibration).attributes["move_runtime"] == "gate"
-
-    zone.move_from_gates = False
-    async_dispatcher_send(hass, controller.signal_control)
-    await hass.async_block_till_done()
-    assert hass.states.get(calibration).attributes["move_runtime"] == "aggregate"
+    after = hass.states.get(calibration)
+    assert after.attributes == before.attributes
+    assert after.last_updated == before.last_updated  # no state-machine write at all
 
 
 async def test_failed_unload_keeps_repairs_warning(hass: HomeAssistant, monkeypatch) -> None:
@@ -370,8 +375,6 @@ async def test_incompatible_statistic_reports_analytic_fallback(
     state = hass.states.get(calibration)
     assert state.state == "recalibration_required"
     assert state.attributes["reason_codes"] == ["statistic_context_changed"]
-    assert state.attributes["move_statistic"] == "analytic"
-    assert state.attributes["move_runtime"] == "aggregate"
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +411,32 @@ async def test_room_entities_mirror_fusion(hass: HomeAssistant, monkeypatch) -> 
     assert hass.states.get(motion).state == "on"
     assert hass.states.get(settled).state == "on"
     assert hass.states.get(activity).state == "settled"
-    assert float(hass.states.get(confidence).state) == pytest.approx(98.7)
+    # Whole percent (recorder discipline): 0.987 rounds to 99.
+    assert hass.states.get(confidence).state == "99"
+
+
+async def test_sub_percent_confidence_wiggle_writes_no_state(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    """The recorder-bloat regression: per-frame confidence wiggle inside one
+    whole-percent step must not touch the state machine at all."""
+    entry, controller, fake = await setup_conductor(hass, monkeypatch)
+    confidence = entity_id_for(hass, "sensor", f"{entry.entry_id}_room_kontor_confidence")
+    room = fake.state.rooms["kontor"]
+
+    room.confidence = 0.502
+    async_dispatcher_send(hass, controller.signal)
+    await hass.async_block_till_done()
+    before = hass.states.get(confidence)
+    assert before.state == "50"
+
+    for wiggle in (0.499, 0.5041, 0.4986):  # all round to 50%
+        room.confidence = wiggle
+        async_dispatcher_send(hass, controller.signal)
+    await hass.async_block_till_done()
+    after = hass.states.get(confidence)
+    assert after.state == "50"
+    assert after.last_updated == before.last_updated  # no new recorder row
 
 
 async def test_room_entities_unavailable_when_fusion_unknown(
@@ -456,7 +484,8 @@ async def test_anyone_home_and_confidence(hass: HomeAssistant, monkeypatch) -> N
     async_dispatcher_send(hass, controller.signal)
     await hass.async_block_till_done()
     assert hass.states.get(anyone).state == "on"
-    assert float(hass.states.get(confidence).state) == pytest.approx(96.4)
+    # Whole percent (recorder discipline): 0.964 rounds to 96.
+    assert hass.states.get(confidence).state == "96"
 
     # Rule 6.5: all zones unhealthy -> anyone_home publishes unknown.
     fake.state.anyone_home = None
@@ -592,17 +621,23 @@ async def test_diagnostics_sensor(hass: HomeAssistant, monkeypatch) -> None:
 
     state = hass.states.get(sensor)
     assert state.state == "enabled"
-    assert state.attributes["enabled"] is True
     assert state.attributes["anyone_home"] is False
     sofakrok = state.attributes["zones"]["sofakrok"]
     assert sofakrok["health"] == "ok"
     assert sofakrok["activity"] == "empty"
     assert sofakrok["occupied"] is False
-    assert "lambda" in sofakrok
+    assert sofakrok["calibration"] == "recalibration_required"
     assert state.attributes["rooms"]["stue"]["occupied"] is False
-    assert state.attributes["rooms"]["stue"]["motion"] is False
+    assert state.attributes["rooms"]["stue"]["settled"] is False
     assert state.attributes["sensors"]["sofakrok_radar"] == {"available": True}
-    assert "home_lambda" in state.attributes
+    # Recorder discipline: no per-frame numerics on the entity, and the
+    # discrete summary duplicates dedicated entities — kept unrecorded.
+    for volatile in ("home_lambda", "home_confidence", "enabled"):
+        assert volatile not in state.attributes
+    assert "lambda" not in sofakrok
+    assert "dwell_seconds" not in sofakrok
+    unrecorded = ConductorStateSensor._unrecorded_attributes
+    assert unrecorded == frozenset({"anyone_home", "zones", "rooms", "sensors"})
 
     fake.state.enabled = False
     async_dispatcher_send(hass, controller.signal_control)
