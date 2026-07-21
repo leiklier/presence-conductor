@@ -14,5 +14,5 @@
     "custom_components.presence_conductor"
   ],
   "requirements": [],
-  "version": "0.5.2"
+  "version": "0.5.3"
 }

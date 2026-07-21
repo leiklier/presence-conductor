@@ -40,9 +40,10 @@ publishing signals automations can actually use:
 - **guided calibration** — record an empty-room baseline per zone instead of
   hand tuning 18 gate thresholds
 - **recorder-friendly** — entity states and attributes only change at
-  natural intervals (discrete transitions, whole-percent confidence steps,
-  10 s dwell buckets), so the Home Assistant recorder stays lean; the
-  per-frame numerics live in the config entry's diagnostics download
+  natural intervals (discrete transitions, 5-point confidence buckets
+  behind a 10 s publish interval, 10 s dwell buckets), so the Home
+  Assistant recorder stays lean; the per-frame numerics live in the
+  config entry's diagnostics download
 
 Status: deployed in production. The architecture decision is documented in
 [docs/DECISION.md](docs/DECISION.md). The documentation map starts at

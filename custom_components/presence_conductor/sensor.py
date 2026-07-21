@@ -6,16 +6,18 @@ Confidence and dwell are diagnostic surfaces; the state sensor keeps a
 discrete engine summary at a glance.
 
 Recorder discipline: entity states and attributes only carry values that
-change at natural intervals — discrete transitions, whole-percent
-confidence steps, coarse dwell buckets. Per-frame numerics (lambdas,
-baselines, runtime evidence paths) live in the diagnostics download
-(``diagnostics.py``), never on entities, because every attribute change
-writes a recorder row regardless of recorder-side attribute exclusion.
+change at natural intervals — discrete transitions, bucketed confidence
+behind a publish interval, coarse dwell buckets. Per-frame numerics
+(lambdas, baselines, runtime evidence paths) live in the diagnostics
+download (``diagnostics.py``), never on entities, because every attribute
+change writes a recorder row regardless of recorder-side attribute
+exclusion.
 """
 
 from __future__ import annotations
 
 import math
+import time
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -25,7 +27,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfTime
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -37,6 +39,57 @@ from .entity import ConductorEntity
 
 ACTIVITY_OPTIONS = [activity.value for activity in Activity]
 CALIBRATION_OPTIONS = [status.value for status in CalibrationStatus]
+
+#: Confidence quantization step, in percent points. Whole-percent steps
+#: still wrote a recorder row per frame during belief sweeps (measured
+#: live: 47 -> 0 in five seconds, one row per percent); a sweep now
+#: crosses ~20 buckets, and the interval below collapses that to 1-2
+#: rows. The 5-minute long-term statistics keep the fine trend.
+CONFIDENCE_STEP = 5
+#: Minimum seconds between confidence publishes per sensor. Suppressed
+#: values are not lost: the 1 Hz tick keeps dispatching, so the settled
+#: value lands at most one interval late. Availability transitions
+#: bypass the interval — "blind" must surface immediately (rule 6.3).
+CONFIDENCE_PUBLISH_INTERVAL = 10.0
+
+#: Monotonic clock hook; tests patch this to script the interval.
+_monotonic = time.monotonic
+
+
+def quantized_confidence(confidence: float) -> int:
+    """Confidence as a percentage in :data:`CONFIDENCE_STEP` buckets."""
+    return CONFIDENCE_STEP * round(confidence * 100.0 / CONFIDENCE_STEP)
+
+
+class ConfidencePublishGate:
+    """Mixin for confidence sensors: a rate-limited diagnostic trend.
+
+    Confidence is a monotone score wired to per-frame belief, so raw
+    publishes follow the radar's cadence no matter how the value is
+    quantized. This gate republishes only when the bucketed value (or
+    availability) actually changed, and value-only changes at most once
+    per :data:`CONFIDENCE_PUBLISH_INTERVAL`.
+    """
+
+    _published: tuple[bool, int | None] | None = None
+    _published_at: float | None = None
+
+    @callback
+    def _on_controller_update(self) -> None:
+        now = _monotonic()
+        snapshot = (self.available, self.native_value if self.available else None)
+        if self._published is not None:
+            if snapshot == self._published:
+                return  # unchanged — skip even the state_reported write
+            if (
+                snapshot[0] == self._published[0]
+                and self._published_at is not None
+                and now - self._published_at < CONFIDENCE_PUBLISH_INTERVAL
+            ):
+                return  # inside the interval; a later tick lands the value
+        self._published = snapshot
+        self._published_at = now
+        super()._on_controller_update()
 
 
 async def async_setup_entry(
@@ -104,13 +157,11 @@ class ZoneActivitySensor(ZoneSensor):
         return self.zone_state.activity.value
 
 
-class ZoneConfidenceSensor(ZoneSensor):
+class ZoneConfidenceSensor(ConfidencePublishGate, ZoneSensor):
     """Zone occupancy confidence (§0), as a percentage — a monotone
-    score, not a calibrated probability (rule 8.7).
-
-    Whole percent: sub-percent wiggle would write a recorder row per
-    frame; long-term MEASUREMENT statistics keep the 5-minute trend.
-    """
+    score, not a calibrated probability (rule 8.7). Bucketed and
+    rate-limited by :class:`ConfidencePublishGate`; long-term
+    MEASUREMENT statistics keep the 5-minute trend."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = PERCENTAGE
@@ -125,7 +176,7 @@ class ZoneConfidenceSensor(ZoneSensor):
 
     @property
     def native_value(self) -> int:
-        return round(self.zone_state.confidence * 100.0)
+        return quantized_confidence(self.zone_state.confidence)
 
 
 #: Dwell resolution in seconds: a per-tick counter would write a recorder
@@ -230,8 +281,8 @@ class RoomActivitySensor(RoomSensor):
         return activity.value if activity is not None else None
 
 
-class RoomConfidenceSensor(RoomSensor):
-    """Maximum member confidence (rule 6.1), as a whole percentage."""
+class RoomConfidenceSensor(ConfidencePublishGate, RoomSensor):
+    """Maximum member confidence (rule 6.1), bucketed and rate-limited."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = PERCENTAGE
@@ -251,11 +302,12 @@ class RoomConfidenceSensor(RoomSensor):
     @property
     def native_value(self) -> int | None:
         confidence = self.room_state.confidence
-        return round(confidence * 100.0) if confidence is not None else None
+        return quantized_confidence(confidence) if confidence is not None else None
 
 
-class HomeConfidenceSensor(ConductorEntity, SensorEntity):
-    """Home-level occupancy confidence (rule 6.5), as a whole percentage."""
+class HomeConfidenceSensor(ConfidencePublishGate, ConductorEntity, SensorEntity):
+    """Home-level occupancy confidence (rule 6.5), bucketed and
+    rate-limited."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = PERCENTAGE
@@ -275,7 +327,7 @@ class HomeConfidenceSensor(ConductorEntity, SensorEntity):
     @property
     def native_value(self) -> int | None:
         confidence = self.engine_state.home_confidence
-        return round(confidence * 100.0) if confidence is not None else None
+        return quantized_confidence(confidence) if confidence is not None else None
 
 
 class ConductorStateSensor(ConductorEntity, SensorEntity):
