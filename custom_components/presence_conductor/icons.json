@@ -88,15 +88,6 @@
     "button": {
       "record_baseline": {
         "default": "mdi:chart-bell-curve"
-      },
-      "start_full_calibration": {
-        "default": "mdi:school"
-      },
-      "next_calibration_phase": {
-        "default": "mdi:skip-next-circle"
-      },
-      "cancel_calibration": {
-        "default": "mdi:cancel"
       }
     },
     "event": {
@@ -111,15 +102,6 @@
   "services": {
     "record_baseline": {
       "service": "mdi:chart-bell-curve"
-    },
-    "start_full_calibration": {
-      "service": "mdi:school"
-    },
-    "advance_full_calibration": {
-      "service": "mdi:skip-next-circle"
-    },
-    "cancel_calibration": {
-      "service": "mdi:cancel"
     }
   }
 }

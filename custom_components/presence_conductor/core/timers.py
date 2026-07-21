@@ -26,12 +26,3 @@ def motion_off(zone_id: str) -> str:
 def baseline_end(zone_id: str) -> str:
     """End of a RecordBaseline collection window (rule 3.3)."""
     return f"{BASELINE_END_PREFIX}{zone_id}"
-
-
-GUIDED_PHASE_END_PREFIX = "guided_phase_end:"
-
-
-def guided_phase_end(zone_id: str) -> str:
-    """Timer key closing one labeled full-calibration phase."""
-
-    return f"{GUIDED_PHASE_END_PREFIX}{zone_id}"

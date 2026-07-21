@@ -13,7 +13,7 @@ from __future__ import annotations
 from itertools import pairwise
 from typing import TYPE_CHECKING
 
-from . import activity, belief, emissions, evidence, guided, timers
+from . import activity, belief, evidence, timers
 from .events import SensorFrame
 from .model import Health, ZoneConfig, ZoneState
 
@@ -63,8 +63,6 @@ def advance_zone(
     """
     if zst.health is not Health.OK:
         return  # 1.3: outputs hold their last state while UNKNOWN
-    if guided.sensor_is_suspended(engine, zone.sensor_id):
-        return  # intentional calibration movement never reaches consumers
     if zst.recording is not None:
         return  # 3.3: suspended while calibrating — belief pinned at prior
     t = engine.config.tunables
@@ -111,7 +109,7 @@ def on_frame(engine: ConductorEngine, frame: SensorFrame, now: float, plan: Plan
         zst = engine.state.zones[zone.zone_id]
         if zst.health is not Health.OK:
             continue  # 1.3: cached/non-measurement frames cannot mutate frozen outputs
-        if zst.recording is not None or guided.sensor_is_suspended(engine, frame.sensor_id):
+        if zst.recording is not None:
             continue  # 3.3: suspended while calibrating
         path = "move_gate" if zst.move_from_gates else "move_agg"
         if zst.attack_path is not None and zst.attack_path != path:
@@ -129,21 +127,7 @@ def on_frame(engine: ConductorEngine, frame: SensorFrame, now: float, plan: Plan
         # re-emits its cached frame on any entity change) and leave the
         # chain untouched; elapsed time alone proves nothing.
         if sensor.move_energy_fresh:
-            learned_accepts = True
-            profile = zst.occupied_profile
-            same_path = zst.move_from_gates == zst.still_from_gates
-            profile_path = "gate" if zst.move_from_gates else "aggregate"
-            if profile is not None and same_path and profile.path == profile_path:
-                # A nuisance spike that the held-out occupied model rejects
-                # cannot bypass it through the analytic-tail fast path.
-                learned_accepts = (
-                    sensor.move_obs_at is not None
-                    and sensor.still_obs_at is not None
-                    and now - sensor.move_obs_at <= t.obs_budget
-                    and now - sensor.still_obs_at <= t.obs_budget
-                    and emissions.occupied_discriminant(profile, (zst.z_move, zst.z_still)) >= 0.0
-                )
-            if zst.attack_candidate and learned_accepts:
+            if zst.attack_candidate:
                 # 4.2: confirmation greatly reduces the joint nominal tail
                 # only when observations are approximately independent. A calibrated
                 # dependence estimate (3.7) for the path in force scales

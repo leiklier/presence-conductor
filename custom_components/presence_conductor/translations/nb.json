@@ -64,16 +64,6 @@
       "overlap": {
         "title": "Overlappende soner",
         "description": "Soner fra ulike sensorer overlapper i samme rom:\n\n{overlaps}\n\nSeparasjon i samme rom hviler på ikke-overlappende avstandsintervaller — overlapp betyr at begge sensorene vil gjøre krav på samme mål. Dette er en advarsel, ikke en feil: send inn for å beholde konfigurasjonen likevel, eller juster den senere via Konfigurer."
-      },
-      "calibration_mode": {
-        "title": "Velg kalibrering",
-        "description": "Velg hvordan Presence Conductor skal kalibreres. Enkel kalibrering av tomt rom er anbefalt som start. Full kalibrering legger til veiledet registrering av et opptatt rom og validering når dette er tilgjengelig. Valget starter ingen registrering, og du kan endre det senere under Konfigurer.",
-        "data": {
-          "calibration_mode": "Kalibreringsmodus"
-        },
-        "data_description": {
-          "calibration_mode": "Hopp over skjuler påminnelser og beholder kompatibel lagret kalibrering; Enkel registrerer en grunnlinje for tomt rom; Full velger hele den veiledede arbeidsflyten."
-        }
       }
     },
     "error": {
@@ -99,18 +89,7 @@
         "menu_options": {
           "sensors": "Sensorer — legg til eller fjern mmWave-enheter",
           "zones": "Soner — rom, avstandsutsnitt, reserve",
-          "calibration": "Kalibrering — velg hopp over, enkel eller full",
           "tunables": "Justeringer — bevisvekter, terskler, tider"
-        }
-      },
-      "calibration": {
-        "title": "Kalibrering",
-        "description": "Velg kalibreringsarbeidsflyten. Endring av denne innstillingen bevarer alle registrerte grunnlinjer og starter ingen registrering.",
-        "data": {
-          "calibration_mode": "Kalibreringsmodus"
-        },
-        "data_description": {
-          "calibration_mode": "Enkel er den bakoverkompatible standarden. Du kan komme tilbake senere for å oppgradere til Full eller uttrykkelig hoppe over kalibrering."
         }
       },
       "sensors": {
@@ -330,26 +309,15 @@
           "ready": "Klar",
           "uncalibrated": "Ikke kalibrert",
           "recalibration_required": "Ny kalibrering kreves",
-          "calibrating": "Kalibrerer",
-          "skipped": "Hoppet over",
-          "partial": "Tomromsgrunnlinje klar"
+          "calibrating": "Kalibrerer"
         }
-      }
-    }
-  },
-  "selector": {
-    "calibration_mode": {
-      "options": {
-        "simple": "Enkel tomromskalibrering (anbefalt)",
-        "full": "Full veiledet kalibrering",
-        "skip": "Hopp over kalibrering"
       }
     }
   },
   "issues": {
     "calibration_required": {
       "title": "Tilstedeværelseskalibreringen trenger oppfølging",
-      "description": "Presence Conductor bruker sikker reservekalibrering for én eller flere soner.\n\n{details}\n\nFor Enkel-modus må hele sensorens synsfelt være tomt før du trykker **Ta opp grunnlinje**. For Full-modus trykker du **Start full kalibrering** og følger fasen på kalibreringsstatussensoren."
+      "description": "Presence Conductor bruker sikker reservekalibrering for én eller flere soner.\n\n{details}\n\nHold hver berørt sone tom og trykk på **Registrer grunnlinje**-knappen. Standard opptakstid er 300 sekunder."
     }
   },
   "services": {
@@ -365,29 +333,6 @@
           "name": "Varighet",
           "description": "Innsamlingsvindu i sekunder. Standard er justeringsverdien 'Grunnlinjevarighet' (300 s). Resultatet — lagret eller avvist med dekning per kanal — vises på sonens kalibreringshendelse og presence_conductor_baseline_recorded-busshendelsen."
         }
-      }
-    },
-    "start_full_calibration": {
-      "name": "Start full kalibrering",
-      "description": "Starter den veiledede fulle arbeidsflyten med en tomromsgrunnlinje. Hele sensorens synsfelt må være tomt.",
-      "fields": {
-        "zone_id": {"name": "Sone", "description": "Intern sone-ID."},
-        "duration": {"name": "Grunnlinjevarighet", "description": "Valgfri varighet i sekunder."}
-      }
-    },
-    "advance_full_calibration": {
-      "name": "Ta opp neste kalibreringsfase",
-      "description": "Tar opp neste merkede fase som vises på sonens kalibreringsstatussensor.",
-      "fields": {
-        "zone_id": {"name": "Sone", "description": "Intern sone-ID."},
-        "duration": {"name": "Fasevarighet", "description": "Valgfri varighet i sekunder; standard er 60."}
-      }
-    },
-    "cancel_calibration": {
-      "name": "Avbryt kalibrering",
-      "description": "Avbryter aktiv kalibrering uten å erstatte tidligere lagrede data.",
-      "fields": {
-        "zone_id": {"name": "Sone", "description": "Intern sone-ID."}
       }
     }
   }

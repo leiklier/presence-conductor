@@ -25,8 +25,7 @@ Supporting documents are deliberately non-normative:
 - **Room:** a set of zones. Rooms are the fusion unit.
 - **Belief:** each zone stores a bounded accumulator `lambda`; `confidence =
   sigmoid(lambda)` is a monotone occupancy score, not a calibrated posterior
-  probability. Simple calibration learns the empty distribution; optional
-  Full calibration also learns and validates local occupied emissions (3.9).
+  probability. Evidence learns the empty distribution only (8.7).
 
 Zone outputs are `occupied`, `motion`, `activity` (`empty`, `passing`,
 `active`, `settled`), `confidence`, `dwell_seconds`, and `pass_by`. Room
@@ -151,9 +150,7 @@ count. See [Estimator rationale](ESTIMATOR_RATIONALE.md) for derivations.
   confidence below `p_background` for `t_background`, floors adapt with EMA
   time constant `tau_background`. Adaptation may move `mu` and increase
   `sigma`; it may not decrease the conservative calibrated scale. It stops
-  while unavailable, occupied, explicitly calibrating, or while a Full
-  occupied profile is installed. A Full profile is bound to its exact empty
-  transform, so changing floors behind it would invalidate its features.
+  while unavailable, occupied, or explicitly calibrating.
 - **3.5 Still-margin recovery.** While the frozen still distance remains usable
   under 2.7, energy above its calibrated floor contributes positive evidence
   even when the radar's binary still-target flag has dropped. This margin
@@ -185,43 +182,6 @@ count. See [Estimator rationale](ESTIMATOR_RATIONALE.md) for derivations.
   contributes nothing. Stale positive evidence never becomes absence; with all
   channels silent, `u=0` and only the departure hazard changes belief.
 
-- **3.9 Calibration levels.** Operator intent is `skip`, `simple`, or `full`;
-  missing legacy intent means `simple`. Skip suppresses calibration prompts;
-  manual capture remains available and any compatible saved calibration stays active. Simple is
-  the transactional empty baseline in 3.3. Full records that baseline, then
-  eight explicit phases: training empty, moving, standing, seated; validation
-  moving, standing, seated, empty (empty is last so the room is safe to re-enter).
-  Each phase requires at least 15 fresh observation epochs and a live sensor at
-  close. Raw labeled rows stay in memory and are discarded after completion,
-  rejection, cancellation, unload, or restart.
-
-  Full calibration suspends every zone of the selected sensor so intentional
-  movement cannot reach zone, room, home, motion, or pass-by outputs. Only one
-  calibration may run per sensor. Empty calibration requires the sensor's
-  entire field of view—not merely one distance slice—to be empty because
-  aggregate energies are sensor-global.
-
-- **3.10 Occupied emission model and validation.** Full calibration fits a
-  regularized shared-covariance two-feature LDA over the existing clipped,
-  empty-standardized `(z_move,z_still)` feature. Moving is one occupied mode;
-  standing and seated form the stationary mode. Classes and occupied modes
-  receive equal weights, so recording duration cannot become a deployment
-  prior. The two discriminants combine by normalized log-sum-exp into a
-  two-sided rate bounded to `[-3,3]` and by `u_cap`.
-
-  Training and validation phases are never mixed. The held-out result stores
-  TP, FP, TN, FN, sensitivity, specificity and balanced accuracy plus
-  per-scenario recall. The ordered held-out observations are also replayed
-  through 4.1: every occupied scenario must cross `theta_on`, and empty must
-  never cross it. A profile commits only with sensitivity at least 70%,
-  specificity at least 80%, at least 50% recall in every occupied scenario,
-  negative mean empty drive, and positive mean drive in every occupied
-  scenario. Full is one atomic transaction: failure/cancellation restores a
-  previous Full calibration, or keeps the newly useful empty baseline on the
-  first Full attempt. Profiles bind to the exact aggregate/gate path, gate
-  family, exact floors, floor settings, statistic transforms, geometry, and
-  distance-hold context; mismatch or per-frame gate fallback uses 3.2 unchanged.
-
 ## 4. Occupancy filter
 
 - **4.1 Chronological integration.** Every event first integrates the evidence
@@ -243,10 +203,6 @@ count. See [Estimator rationale](ESTIMATOR_RATIONALE.md) for derivations.
   a 0.1 s defensive floor. Candidates closer than `g` are ignored. A fresh
   non-candidate, stale/unavailable interval, or aggregate/gate path switch
   resets the chain. Non-fresh frames do not change it.
-
-  With a compatible Full profile on the active path, the candidate must also
-  have a non-negative occupied discriminant. A nuisance tail spike rejected by
-  the validated model therefore cannot bypass it through fast attack.
 - **4.3 Hysteresis.** Occupancy turns on at `theta_on` (default confidence
   0.80), off at `theta_off` (default 0.20), and otherwise holds.
 - **4.4 Motion.** Motion turns on for gated `ẑ_move >= z_motion` (default 2)
@@ -309,11 +265,9 @@ count. See [Estimator rationale](ESTIMATOR_RATIONALE.md) for derivations.
   history and transition metrics.
 - **8.6** Audio and lighting behavior belongs in consumer integrations; this
   package publishes zone and room presence only.
-- **8.7** The score is not a posterior probability. Full calibration learns a
-  local likelihood-ratio map and validates binary classification on a short
-  held-out capture; it does not estimate population priors, transition
-  probabilities, or a reliability curve. Confidence remains a bounded
-  monotone control score.
+- **8.7** The score is not a posterior probability. A two-state model requires
+  labeled occupied data and reliability validation. Remaining statistical and
+  capture work is tracked in [Estimator rationale](ESTIMATOR_RATIONALE.md#roadmap).
 
 ## Tunable defaults
 
