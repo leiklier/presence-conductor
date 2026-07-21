@@ -16,12 +16,16 @@ from pytest_homeassistant_custom_component.common import (
     mock_restore_cache,
 )
 
+from custom_components.presence_conductor import sensor as sensor_module
 from custom_components.presence_conductor.calibration import CALIBRATION_ISSUE_ID_PREFIX
 from custom_components.presence_conductor.const import DOMAIN
 from custom_components.presence_conductor.core.events import RecordBaseline, SetEnabled
 from custom_components.presence_conductor.core.model import Activity, Health, Tunables
 from custom_components.presence_conductor.core.stats import floor_calibration_fingerprint
-from custom_components.presence_conductor.sensor import ConductorStateSensor
+from custom_components.presence_conductor.sensor import (
+    CONFIDENCE_PUBLISH_INTERVAL,
+    ConductorStateSensor,
+)
 from tests.test_controller import KONTOR, OPTIONS, SOFAKROK, setup_conductor
 
 
@@ -30,6 +34,24 @@ def entity_id_for(hass: HomeAssistant, platform: str, unique_id: str) -> str:
     entity_id = registry.async_get_entity_id(platform, DOMAIN, unique_id)
     assert entity_id is not None, f"no {platform} entity with unique_id {unique_id}"
     return entity_id
+
+
+@pytest.fixture
+def confidence_clock(monkeypatch):
+    """Script the confidence publish-gate clock (sensor._monotonic).
+
+    Returns an ``advance(seconds)`` callable; use it between dispatches to
+    step past CONFIDENCE_PUBLISH_INTERVAL. Without it, a value change
+    dispatched right after setup lands inside the startup publish's
+    interval and is (correctly) suppressed.
+    """
+    state = {"now": 1000.0}
+    monkeypatch.setattr(sensor_module, "_monotonic", lambda: state["now"])
+
+    def advance(seconds: float) -> None:
+        state["now"] += seconds
+
+    return advance
 
 
 # ---------------------------------------------------------------------------
@@ -127,21 +149,25 @@ async def test_zone_activity_enum(hass: HomeAssistant, monkeypatch) -> None:
 
 
 @pytest.mark.usefixtures("entity_registry_enabled_by_default")
-async def test_zone_confidence_and_dwell(hass: HomeAssistant, monkeypatch) -> None:
+async def test_zone_confidence_and_dwell(
+    hass: HomeAssistant, monkeypatch, confidence_clock
+) -> None:
     entry, controller, fake = await setup_conductor(hass, monkeypatch)
     confidence = entity_id_for(hass, "sensor", f"{entry.entry_id}_zone_sofakrok_confidence")
     dwell = entity_id_for(hass, "sensor", f"{entry.entry_id}_zone_sofakrok_dwell")
 
-    assert float(hass.states.get(confidence).state) == pytest.approx(2.0)  # the prior
+    # The 2% prior lands in the 0 bucket (5-point steps).
+    assert hass.states.get(confidence).state == "0"
     assert hass.states.get(confidence).attributes["unit_of_measurement"] == "%"
     assert hass.states.get(dwell).state == "0"
     assert hass.states.get(dwell).attributes["unit_of_measurement"] == "s"
 
     fake.state.zones["sofakrok"].lam = 0.0  # p = 0.5
     fake.state.zones["sofakrok"].dwell_seconds = 12.34
+    confidence_clock(CONFIDENCE_PUBLISH_INTERVAL + 1)
     async_dispatcher_send(hass, controller.signal)
     await hass.async_block_till_done()
-    assert float(hass.states.get(confidence).state) == pytest.approx(50.0)
+    assert hass.states.get(confidence).state == "50"
     # Dwell is floored to 10 s buckets so the recorder only sees a row
     # every bucket, not every tick.
     assert hass.states.get(dwell).state == "10"
@@ -382,7 +408,9 @@ async def test_incompatible_statistic_reports_analytic_fallback(
 # ---------------------------------------------------------------------------
 
 
-async def test_room_entities_mirror_fusion(hass: HomeAssistant, monkeypatch) -> None:
+async def test_room_entities_mirror_fusion(
+    hass: HomeAssistant, monkeypatch, confidence_clock
+) -> None:
     entry, controller, fake = await setup_conductor(hass, monkeypatch)
     occupancy = entity_id_for(hass, "binary_sensor", f"{entry.entry_id}_room_kontor_occupancy")
     motion = entity_id_for(hass, "binary_sensor", f"{entry.entry_id}_room_kontor_motion")
@@ -405,38 +433,99 @@ async def test_room_entities_mirror_fusion(hass: HomeAssistant, monkeypatch) -> 
     room.settled = True
     room.activity = Activity.SETTLED
     room.confidence = 0.987
+    confidence_clock(CONFIDENCE_PUBLISH_INTERVAL + 1)
     async_dispatcher_send(hass, controller.signal)
     await hass.async_block_till_done()
     assert hass.states.get(occupancy).state == "on"
     assert hass.states.get(motion).state == "on"
     assert hass.states.get(settled).state == "on"
     assert hass.states.get(activity).state == "settled"
-    # Whole percent (recorder discipline): 0.987 rounds to 99.
-    assert hass.states.get(confidence).state == "99"
+    # 5-point buckets (recorder discipline): 0.987 lands in 100.
+    assert hass.states.get(confidence).state == "100"
 
 
-async def test_sub_percent_confidence_wiggle_writes_no_state(
-    hass: HomeAssistant, monkeypatch
+async def test_sub_bucket_confidence_wiggle_writes_no_state(
+    hass: HomeAssistant, monkeypatch, confidence_clock
 ) -> None:
     """The recorder-bloat regression: per-frame confidence wiggle inside one
-    whole-percent step must not touch the state machine at all."""
+    5-point bucket must not touch the state machine at all — even when the
+    publish interval has long expired."""
     entry, controller, fake = await setup_conductor(hass, monkeypatch)
     confidence = entity_id_for(hass, "sensor", f"{entry.entry_id}_room_kontor_confidence")
     room = fake.state.rooms["kontor"]
 
     room.confidence = 0.502
+    confidence_clock(CONFIDENCE_PUBLISH_INTERVAL + 1)
     async_dispatcher_send(hass, controller.signal)
     await hass.async_block_till_done()
     before = hass.states.get(confidence)
     assert before.state == "50"
 
-    for wiggle in (0.499, 0.5041, 0.4986):  # all round to 50%
+    for wiggle in (0.49, 0.512, 0.4877):  # all land in the 50 bucket
         room.confidence = wiggle
+        confidence_clock(CONFIDENCE_PUBLISH_INTERVAL + 1)  # interval is NOT the guard here
         async_dispatcher_send(hass, controller.signal)
     await hass.async_block_till_done()
     after = hass.states.get(confidence)
     assert after.state == "50"
     assert after.last_updated == before.last_updated  # no new recorder row
+
+
+async def test_confidence_sweep_is_rate_limited(
+    hass: HomeAssistant, monkeypatch, confidence_clock
+) -> None:
+    """The v0.5.2 live finding: a belief sweep wrote a row per frame (one
+    per whole percent, ~10/s). Inside one publish interval a sweep must
+    write at most one state; the settled value lands on a later tick."""
+    entry, controller, fake = await setup_conductor(hass, monkeypatch)
+    confidence = entity_id_for(hass, "sensor", f"{entry.entry_id}_room_kontor_confidence")
+    room = fake.state.rooms["kontor"]
+
+    room.confidence = 0.10
+    confidence_clock(CONFIDENCE_PUBLISH_INTERVAL + 1)
+    async_dispatcher_send(hass, controller.signal)
+    await hass.async_block_till_done()
+    first = hass.states.get(confidence)
+    assert first.state == "10"
+
+    # A full sweep dispatched frame-by-frame within the interval.
+    for step in range(11, 90):
+        room.confidence = step / 100.0
+        async_dispatcher_send(hass, controller.signal)
+    await hass.async_block_till_done()
+    during = hass.states.get(confidence)
+    assert during.last_updated == first.last_updated  # every frame suppressed
+
+    # The next dispatch after the interval lands the settled value.
+    confidence_clock(CONFIDENCE_PUBLISH_INTERVAL + 1)
+    async_dispatcher_send(hass, controller.signal)
+    await hass.async_block_till_done()
+    assert hass.states.get(confidence).state == "90"
+
+
+async def test_confidence_availability_bypasses_publish_interval(
+    hass: HomeAssistant, monkeypatch, confidence_clock
+) -> None:
+    """Rule 6.3: blind fusion must surface immediately, throttled or not."""
+    entry, controller, fake = await setup_conductor(hass, monkeypatch)
+    confidence = entity_id_for(hass, "sensor", f"{entry.entry_id}_room_kontor_confidence")
+    room = fake.state.rooms["kontor"]
+
+    room.confidence = 0.60
+    confidence_clock(CONFIDENCE_PUBLISH_INTERVAL + 1)
+    async_dispatcher_send(hass, controller.signal)
+    await hass.async_block_till_done()
+    assert hass.states.get(confidence).state == "60"
+
+    room.confidence = None  # fusion blind — inside the interval
+    async_dispatcher_send(hass, controller.signal)
+    await hass.async_block_till_done()
+    assert hass.states.get(confidence).state == "unavailable"
+
+    room.confidence = 0.60  # recovery is availability too — also immediate
+    async_dispatcher_send(hass, controller.signal)
+    await hass.async_block_till_done()
+    assert hass.states.get(confidence).state == "60"
 
 
 async def test_room_entities_unavailable_when_fusion_unknown(
@@ -469,7 +558,9 @@ async def test_room_entities_unavailable_when_fusion_unknown(
 # ---------------------------------------------------------------------------
 
 
-async def test_anyone_home_and_confidence(hass: HomeAssistant, monkeypatch) -> None:
+async def test_anyone_home_and_confidence(
+    hass: HomeAssistant, monkeypatch, confidence_clock
+) -> None:
     entry, controller, fake = await setup_conductor(hass, monkeypatch)
     anyone = entity_id_for(hass, "binary_sensor", f"{entry.entry_id}_anyone_home")
     confidence = entity_id_for(hass, "sensor", f"{entry.entry_id}_home_confidence")
@@ -481,11 +572,12 @@ async def test_anyone_home_and_confidence(hass: HomeAssistant, monkeypatch) -> N
 
     fake.state.anyone_home = True
     fake.state.home_confidence = 0.964
+    confidence_clock(CONFIDENCE_PUBLISH_INTERVAL + 1)
     async_dispatcher_send(hass, controller.signal)
     await hass.async_block_till_done()
     assert hass.states.get(anyone).state == "on"
-    # Whole percent (recorder discipline): 0.964 rounds to 96.
-    assert hass.states.get(confidence).state == "96"
+    # 5-point buckets (recorder discipline): 0.964 lands in 95.
+    assert hass.states.get(confidence).state == "95"
 
     # Rule 6.5: all zones unhealthy -> anyone_home publishes unknown.
     fake.state.anyone_home = None
