@@ -20,18 +20,15 @@ mutable state, and every iteration follows config declaration order.
 
 from __future__ import annotations
 
-from . import activity, emissions, evidence, fusion, gating, guided, health, stats, timers
+from . import activity, evidence, fusion, gating, health, stats, timers
 from . import filter as filter_
 from .belief import logit
 from .events import (
-    AdvanceFullCalibration,
-    CancelCalibration,
     Event,
     RecordBaseline,
     SensorAvailability,
     SensorFrame,
     SetEnabled,
-    StartFullCalibration,
     Tick,
 )
 from .model import (
@@ -174,25 +171,6 @@ class ConductorEngine:
                     )
                     if path_ready and (cal.fingerprint is None or cal.fingerprint == expected):
                         zst.stat_cal[key] = cal
-                profile = persisted.occupied_profile
-                if profile is not None and profile.path in {"aggregate", "gate"}:
-                    try:
-                        # Adapter parsing enforces the production sample
-                        # minimum; the pure core also rejects structurally
-                        # invalid programmatic snapshots.
-                        emissions.validate_persisted_profile(profile, min_rows=1)
-                    except ValueError:
-                        profile = None
-                if profile is not None and profile.path in {"aggregate", "gate"}:
-                    profile_ready = profile.path == "aggregate" or (
-                        zst.gate_move_ready and zst.gate_still_ready
-                    )
-                    expected = guided.profile_fingerprint(
-                        self.config, zone, owned, zst, profile.path
-                    )
-                    if profile_ready and profile.fingerprint == expected:
-                        zst.occupied_profile = profile
-                        zst.last_validation = profile.validation
             if not state.sensors[zone.sensor_id].available:
                 zst.health = Health.UNKNOWN  # 1.3
             state.zones[zone.zone_id] = zst
@@ -264,7 +242,6 @@ class ConductorEngine:
                 # _advance. What remains is the tick-aligned calibration
                 # sampling (3.3).
                 evidence.collect_baseline_rows(self, now)
-                guided.collect_rows(self, now)
             case SensorAvailability():
                 health.on_availability(self, event, now, plan)  # 1.3
             case SetEnabled():
@@ -274,12 +251,6 @@ class ConductorEngine:
                 self.state.enabled = event.enabled
             case RecordBaseline():
                 evidence.on_record_baseline(self, event, now, plan)  # 3.3
-            case StartFullCalibration():
-                guided.start_full(self, event, now, plan)
-            case AdvanceFullCalibration():
-                guided.advance(self, event, now, plan)
-            case CancelCalibration():
-                guided.cancel(self, event, plan)
             case _:  # unknown event types are ignored
                 pass
         fusion.refresh(self, now, dt)  # 6 (home decay over dt, 6.5)
@@ -300,9 +271,6 @@ class ConductorEngine:
         elif key.startswith(timers.BASELINE_END_PREFIX):
             # 3.3: calibration window closes.
             evidence.on_baseline_end(self, key.removeprefix(timers.BASELINE_END_PREFIX), now, plan)
-            guided.on_baseline_closed(self, key.removeprefix(timers.BASELINE_END_PREFIX), plan)
-        elif key.startswith(timers.GUIDED_PHASE_END_PREFIX):
-            guided.end_phase(self, key.removeprefix(timers.GUIDED_PHASE_END_PREFIX), now, plan)
         fusion.refresh(self, now, dt)  # 6 / 6.3 / 6.5
         return self._finish(plan)
 

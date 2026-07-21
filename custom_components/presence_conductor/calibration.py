@@ -18,75 +18,12 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 
 from .config import baselines_from_options
-from .const import (
-    CALIBRATION_MODE_FULL,
-    CALIBRATION_MODE_SKIP,
-    CONF_BASELINES,
-    CONF_CALIBRATION_MODE,
-    DEFAULT_CALIBRATION_MODE,
-    DOMAIN,
-    GATE_MOVE_ROLES,
-    GATE_STILL_ROLES,
-)
+from .const import CONF_BASELINES, DOMAIN, GATE_MOVE_ROLES, GATE_STILL_ROLES
 from .core import stats
-from .core.guided import MIN_PHASE_SAMPLES, PHASES
 from .core.model import ChannelStats, ConductorConfig, EngineState, ZoneBaselines
-from .core.plan import BaselineRecorded, FullCalibrationProgress, FullCalibrationRecorded
+from .core.plan import BaselineRecorded
 
 CALIBRATION_ISSUE_ID_PREFIX = "calibration_required"
-
-
-def _confusion_payload(confusion: Any) -> dict[str, int]:
-    return {
-        "true_positive": confusion.true_positive,
-        "false_positive": confusion.false_positive,
-        "true_negative": confusion.true_negative,
-        "false_negative": confusion.false_negative,
-    }
-
-
-def _profile_payload(profile: Any) -> dict[str, Any]:
-    """JSON-safe validated occupied profile; raw labeled rows never persist."""
-    payload: dict[str, Any] = {
-        "active": {
-            "move_weight": profile.active.move_weight,
-            "still_weight": profile.active.still_weight,
-            "intercept": profile.active.intercept,
-        },
-        "settled": {
-            "move_weight": profile.settled.move_weight,
-            "still_weight": profile.settled.still_weight,
-            "intercept": profile.settled.intercept,
-        },
-        "path": profile.path,
-        "active_weight": profile.active_weight,
-        "evidence_scale": profile.evidence_scale,
-        "evidence_min": profile.evidence_min,
-        "evidence_max": profile.evidence_max,
-        "fingerprint": profile.fingerprint,
-        "empty_rows": profile.empty_rows,
-        "active_rows": profile.active_rows,
-        "settled_rows": profile.settled_rows,
-    }
-    if (validation := profile.validation) is not None:
-        payload["validation"] = {
-            "threshold": validation.threshold,
-            "confusion": _confusion_payload(validation.confusion),
-            "empty_mean_rate": validation.empty_mean_rate,
-            "occupied_mean_rates": dict(validation.occupied_mean_rates),
-            "scenarios": [
-                {
-                    "name": scenario.name,
-                    "expected_occupied": scenario.expected_occupied,
-                    "confusion": _confusion_payload(scenario.confusion),
-                    "mean_discriminant": scenario.mean_discriminant,
-                    "minimum_discriminant": scenario.minimum_discriminant,
-                    "maximum_discriminant": scenario.maximum_discriminant,
-                }
-                for scenario in validation.scenarios
-            ],
-        }
-    return payload
 
 
 def baseline_payload(event: BaselineRecorded) -> dict[str, Any]:
@@ -113,47 +50,6 @@ def baseline_payload(event: BaselineRecorded) -> dict[str, Any]:
     }
 
 
-def full_calibration_payload(
-    event: FullCalibrationProgress | FullCalibrationRecorded,
-) -> dict[str, Any]:
-    """JSON-safe progress or final validation payload."""
-    payload: dict[str, Any] = {"zone_id": event.zone_id}
-    if isinstance(event, FullCalibrationProgress):
-        payload.update(
-            {
-                "status": event.status,
-                "phase": event.phase,
-                "phase_number": event.phase_number,
-                "phase_count": event.phase_count,
-                "samples": event.samples,
-            }
-        )
-    else:
-        payload["success"] = event.success
-        if event.metrics is not None:
-            confusion = event.metrics.confusion
-            payload["validation"] = {
-                **_confusion_payload(confusion),
-                "sensitivity": confusion.sensitivity,
-                "specificity": confusion.specificity,
-                "balanced_accuracy": confusion.balanced_accuracy,
-                "scenarios": {
-                    scenario.name: {
-                        **_confusion_payload(scenario.confusion),
-                        "recall": (
-                            scenario.confusion.sensitivity
-                            if scenario.expected_occupied
-                            else scenario.confusion.specificity
-                        ),
-                    }
-                    for scenario in event.metrics.scenarios
-                },
-            }
-    if event.reason:
-        payload["reason"] = event.reason
-    return payload
-
-
 class CalibrationEngine(Protocol):
     """Engine state needed by calibration persistence and diagnostics."""
 
@@ -168,8 +64,6 @@ class CalibrationStatus(StrEnum):
     UNCALIBRATED = "uncalibrated"
     RECALIBRATION_REQUIRED = "recalibration_required"
     CALIBRATING = "calibrating"
-    SKIPPED = "skipped"
-    PARTIAL = "partial"
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,42 +78,11 @@ class CalibrationDiagnostic:
     still_statistic: str
     move_runtime: str
     still_runtime: str
-    target_mode: str = DEFAULT_CALIBRATION_MODE
-    achieved_level: str = "none"
-    phase: str | None = None
-    phase_status: str | None = None
-    last_result: str | None = None
-    last_error: str | None = None
-    validation: Mapping[str, Any] | None = None
-    samples: int = 0
-    minimum_samples: int | None = None
 
     @property
     def action(self) -> str | None:
-        if self.status is CalibrationStatus.CALIBRATING and self.phase is not None:
-            instruction = {
-                "empty_baseline": "Keep the sensor's entire field of view empty.",
-                "train_empty": "Keep the field of view empty under normal background conditions.",
-                "train_moving": "Walk naturally throughout the zone.",
-                "train_standing": "Stand quietly in typical positions in the zone.",
-                "train_seated": "Sit still in typical positions in the zone.",
-                "validate_empty": "Repeat an independent empty-room period.",
-                "validate_moving": "Repeat natural walking for held-out validation.",
-                "validate_standing": "Repeat quiet standing for held-out validation.",
-                "validate_seated": "Repeat seated stillness for held-out validation.",
-            }.get(self.phase, self.phase)
-            if self.phase_status == "waiting":
-                return f"{instruction} Then press Record next calibration phase."
-            return f"{instruction} Continue until this timed phase completes."
-        if self.status is CalibrationStatus.CALIBRATING:
+        if self.status in (CalibrationStatus.READY, CalibrationStatus.CALIBRATING):
             return None
-        if self.status in (CalibrationStatus.READY, CalibrationStatus.SKIPPED):
-            return None
-        if self.target_mode == CALIBRATION_MODE_FULL:
-            return (
-                "Empty the sensor's entire field of view, press Start full calibration, "
-                "then follow each phase shown by this sensor."
-            )
         return "Keep the zone empty and record a new baseline (default 300 seconds)."
 
     def attributes(self) -> dict[str, Any]:
@@ -233,18 +96,6 @@ class CalibrationDiagnostic:
             "still_statistic": self.still_statistic,
             "move_runtime": self.move_runtime,
             "still_runtime": self.still_runtime,
-            "target_mode": self.target_mode,
-            "achieved_level": self.achieved_level,
-            "phase": self.phase,
-            "phase_status": self.phase_status,
-            "last_result": self.last_result,
-            "last_error": self.last_error,
-            "validation": self.validation,
-            "samples": self.samples,
-            "minimum_samples": self.minimum_samples,
-            "sample_progress": (
-                min(1.0, self.samples / self.minimum_samples) if self.minimum_samples else None
-            ),
         }
 
 
@@ -281,35 +132,6 @@ class CalibrationManager:
         move_path = "gate" if zst.move_from_gates else "aggregate"
         still_path = "gate" if zst.still_from_gates else "aggregate"
         status = CalibrationStatus.CALIBRATING if zst.recording is not None else diagnostic.status
-        session = zst.guided_calibration
-        if session is not None:
-            status = CalibrationStatus.CALIBRATING
-        phase = None
-        phase_status = None
-        samples = len(zst.recording.rows) if zst.recording is not None else 0
-        minimum_samples = None
-        if session is not None:
-            phase_status = session.status
-            if zst.recording is not None and session.status == "recording_baseline":
-                phase = "empty_baseline"
-            elif session.recording is not None:
-                phase = session.recording.phase.value
-            elif session.next_phase < len(PHASES):
-                phase = PHASES[session.next_phase].value
-            else:
-                phase = "validation"
-            if session.recording is not None:
-                samples = len(session.recording.rows)
-                minimum_samples = MIN_PHASE_SAMPLES
-        validation = None
-        if zst.last_validation is not None:
-            confusion = zst.last_validation.confusion
-            validation = {
-                **_confusion_payload(confusion),
-                "sensitivity": confusion.sensitivity,
-                "specificity": confusion.specificity,
-                "balanced_accuracy": confusion.balanced_accuracy,
-            }
         return replace(
             diagnostic,
             status=status,
@@ -325,13 +147,6 @@ class CalibrationManager:
                 if f"still_{'gate' if zst.still_from_gates else 'agg'}" in zst.stat_cal
                 else "analytic"
             ),
-            phase=phase,
-            phase_status=phase_status,
-            last_result=zst.last_calibration_result,
-            last_error=zst.last_calibration_error,
-            validation=validation,
-            samples=samples,
-            minimum_samples=minimum_samples,
         )
 
     def _diagnose_zone(self, zone_id: str) -> CalibrationDiagnostic:
@@ -438,22 +253,6 @@ class CalibrationManager:
             if persisted is None
             else (CalibrationStatus.RECALIBRATION_REQUIRED if reasons else CalibrationStatus.READY)
         )
-        target_mode = str(self._entry.options.get(CONF_CALIBRATION_MODE, DEFAULT_CALIBRATION_MODE))
-        achieved_level = (
-            "full" if zst.occupied_profile is not None else ("simple" if context_valid else "none")
-        )
-        if target_mode == CALIBRATION_MODE_SKIP:
-            status = CalibrationStatus.SKIPPED
-            reasons.clear()
-            reason_codes.clear()
-        elif target_mode == CALIBRATION_MODE_FULL and status is CalibrationStatus.READY:
-            if zst.occupied_profile is None:
-                status = CalibrationStatus.PARTIAL
-                add(
-                    "occupied_profile_missing",
-                    "The empty baseline is ready, but no compatible validated "
-                    "occupied profile exists.",
-                )
         return CalibrationDiagnostic(
             status=status,
             reason_codes=tuple(reason_codes),
@@ -463,8 +262,6 @@ class CalibrationManager:
             still_statistic="empirical" if still_stat_path in zst.stat_cal else "analytic",
             move_runtime=move_runtime,
             still_runtime=still_runtime,
-            target_mode=target_mode,
-            achieved_level=achieved_level,
         )
 
     @callback
@@ -481,8 +278,7 @@ class CalibrationManager:
         failing = [
             (zone, self._diagnostics[zone.zone_id])
             for zone in self._config.zones
-            if self._diagnostics[zone.zone_id].status
-            not in {CalibrationStatus.READY, CalibrationStatus.SKIPPED}
+            if self._diagnostics[zone.zone_id].status is not CalibrationStatus.READY
         ]
         if not failing:
             ir.async_delete_issue(self._hass, DOMAIN, self._issue_id)
@@ -558,8 +354,6 @@ class CalibrationManager:
             }
             if statistic_records:
                 record["stats"] = statistic_records
-            if zst.occupied_profile is not None:
-                record["occupied_profile"] = _profile_payload(zst.occupied_profile)
             current[zone.zone_id] = record
 
         merged = {**stored, **current}

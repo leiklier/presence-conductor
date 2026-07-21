@@ -13,31 +13,6 @@ new return is under that distribution. Calling the output a posterior
 probability would be statistically false; `confidence` is a bounded monotone
 score.
 
-Full calibration now supplies local occupied labels, but a few scripted minutes
-still cannot estimate household priors or universal transitions. It therefore
-learns only a regularized occupied-emission likelihood ratio and keeps the same
-bounded confidence contract.
-
-## Why not replace the filter with an HMM or HSMM
-
-The current temporal layer already provides the useful hidden-state behavior in
-continuous time: a departure hazard, bounded evidence integration, hysteresis,
-confirmed attack, and explicit activity/dwell durations. It handles irregular
-Home Assistant timestamps and knows that repeated held values are one
-observation. A conventional discrete HMM would assume geometric dwell and count
-correlated reports independently unless those safeguards were rebuilt. An HSMM
-could express durations, but adds parameters that a short household capture
-cannot identify reliably.
-
-The full workflow therefore changes the emission map, not the temporal state
-machine. Regularized two-dimensional LDA captures move/still correlation;
-separate moving and stationary modes handle multimodality; and a whole second
-capture pass supplies a real confusion matrix plus a replay through the actual
-continuous-time filter. Exact context fingerprints keep experimental gate
-fallback safe. Background floor adaptation freezes while a learned profile is
-installed because changing that feature transform would invalidate the model;
-an explicit Full recalibration updates both atomically.
-
 The key safety invariant is negative expected empty-room drive. A one-sided
 score `max(0,Z)` has positive mean even for perfectly symmetric Gaussian noise,
 and the maximum over gates grows with gate count. Centering the exact aggregate
@@ -127,8 +102,9 @@ and calibration coverage. Neither replaces labeled occupancy metrics.
 
 ## Roadmap
 
-Calling confidence probabilistic would still require representative long-run
-labels and reliability-curve validation. Other useful work includes:
+The statistically complete upgrade is a two-state model with transition hazards
+and occupied/empty emission distributions learned from labeled data, followed by
+reliability-curve validation. Other useful work includes:
 
 - calibration contamination detection and long-run drift diagnostics;
 - sensor-scoped gate floors shared safely between zones;

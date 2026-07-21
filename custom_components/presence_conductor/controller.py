@@ -60,23 +60,12 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.helpers.start import async_at_started
 
-from .calibration import (
-    CalibrationDiagnostic,
-    CalibrationManager,
-    baseline_payload,
-    full_calibration_payload,
-)
+from .calibration import CalibrationDiagnostic, CalibrationManager, baseline_payload
 from .config import sensor_entities
 from .const import DOMAIN, GATE_ROLES
 from .core.events import Event, SensorAvailability, Tick
 from .core.model import ConductorConfig, EngineState, InitialSnapshot
-from .core.plan import (
-    BaselineRecorded,
-    FullCalibrationProgress,
-    FullCalibrationRecorded,
-    PassBy,
-    Plan,
-)
+from .core.plan import BaselineRecorded, PassBy, Plan
 from .observation import FRAME_ROLES, SensorView, build_view, required_available
 
 _LOGGER = logging.getLogger(__name__)
@@ -86,8 +75,6 @@ EVENT_PASS_BY = f"{DOMAIN}_pass_by"
 #: HA bus event fired for every RecordBaseline outcome (rule 3.3) —
 #: success or rejection, with the per-path coverage verdicts.
 EVENT_BASELINE_RECORDED = f"{DOMAIN}_baseline_recorded"
-#: HA bus event for guided phase changes and held-out validation results.
-EVENT_FULL_CALIBRATION = f"{DOMAIN}_full_calibration"
 
 
 class EngineProtocol(Protocol):
@@ -371,12 +358,6 @@ class PresenceConductorController:
                         event.zone_id,
                         payload["coverage"],
                     )
-            elif isinstance(event, (FullCalibrationProgress, FullCalibrationRecorded)):
-                payload = full_calibration_payload(event)
-                self.hass.bus.async_fire(EVENT_FULL_CALIBRATION, payload)
-                if isinstance(event, FullCalibrationRecorded):
-                    level = logging.INFO if event.success else logging.WARNING
-                    _LOGGER.log(level, "Full calibration for %s: %s", event.zone_id, payload)
         self._publish(plan.suppress_outputs)
 
     @callback

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from .model import ChannelCoverage, EmissionValidationMetrics
+    from .model import ChannelCoverage
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,29 +59,6 @@ class BaselineRecorded(EmittedEvent):
     frame_count: int
     success: bool = True
     coverage: Mapping[str, ChannelCoverage] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class FullCalibrationProgress(EmittedEvent):
-    """A guided full-calibration session changed phase or state."""
-
-    zone_id: str
-    status: str
-    phase: str | None
-    phase_number: int
-    phase_count: int
-    samples: int = 0
-    reason: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class FullCalibrationRecorded(EmittedEvent):
-    """Final held-out validation result of a full calibration."""
-
-    zone_id: str
-    success: bool
-    metrics: EmissionValidationMetrics | None = None
-    reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

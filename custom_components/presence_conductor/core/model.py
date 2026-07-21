@@ -310,71 +310,6 @@ class BaselineRecording:
     started_at: float = 0.0
 
 
-class GuidedPhase(StrEnum):
-    """Ordered labeled captures in a full guided calibration."""
-
-    TRAIN_EMPTY = "train_empty"
-    TRAIN_MOVING = "train_moving"
-    TRAIN_STANDING = "train_standing"
-    TRAIN_SEATED = "train_seated"
-    VALIDATE_EMPTY = "validate_empty"
-    VALIDATE_MOVING = "validate_moving"
-    VALIDATE_STANDING = "validate_standing"
-    VALIDATE_SEATED = "validate_seated"
-
-
-@dataclass(slots=True)
-class GuidedPhaseRecording:
-    """Fresh, tick-aligned feature rows for one labeled phase."""
-
-    phase: GuidedPhase
-    rows: list[tuple[float, float]] = field(default_factory=list)
-    observed_times: list[float] = field(default_factory=list)
-    evidence_budgets: list[float] = field(default_factory=list)
-    path: str | None = None
-    started_at: float = 0.0
-    last_frame_obs: int = 0
-    last_observed_at: float | None = None
-    maximum_observation_gap: float = 0.0
-
-
-@dataclass(frozen=True, slots=True)
-class ZoneCalibrationSnapshot:
-    """Exact pre-session transforms restored by failed full recalibration."""
-
-    move_mu: float
-    move_sigma: float
-    still_mu: float
-    still_sigma: float
-    gate_move: tuple[tuple[int, float, float], ...]
-    gate_still: tuple[tuple[int, float, float], ...]
-    gate_move_ready: bool
-    gate_still_ready: bool
-    statistics: Mapping[str, StatBaseline]
-    profile: OccupiedEmissionProfile | None
-    validation: EmissionValidationMetrics | None
-
-
-@dataclass(slots=True)
-class GuidedCalibrationSession:
-    """In-memory train/validation transaction for one zone.
-
-    Raw labeled rows are deliberately never persisted. Only a profile that
-    passes independent validation is committed.
-    """
-
-    next_phase: int = 0
-    training: dict[GuidedPhase, list[tuple[float, float]]] = field(default_factory=dict)
-    validation: dict[GuidedPhase, list[tuple[float, float]]] = field(default_factory=dict)
-    validation_times: dict[GuidedPhase, list[float]] = field(default_factory=dict)
-    validation_budgets: dict[GuidedPhase, list[float]] = field(default_factory=dict)
-    recording: GuidedPhaseRecording | None = None
-    status: str = "recording_baseline"
-    path: str | None = None
-    reason: str | None = None
-    previous: ZoneCalibrationSnapshot | None = None
-
-
 @dataclass(slots=True)
 class ZoneState:
     """Mutable runtime state of a zone (owned by the engine).
@@ -446,15 +381,6 @@ class ZoneState:
     last_adapt_at: float | None = None
     #: Active RecordBaseline collection, if any (rule 3.3).
     recording: BaselineRecording | None = None
-    #: Optional occupied-emission profile learned by a full guided
-    #: calibration. The empty-only estimator remains the exact fallback.
-    occupied_profile: OccupiedEmissionProfile | None = None
-    #: Active staged full calibration. Samples live only in memory.
-    guided_calibration: GuidedCalibrationSession | None = None
-    #: Most recent full-calibration outcome for operator diagnostics.
-    last_calibration_result: str | None = None
-    last_calibration_error: str | None = None
-    last_validation: EmissionValidationMetrics | None = None
 
     @property
     def confidence(self) -> float:
@@ -556,116 +482,6 @@ class StatBaseline:
 
 
 @dataclass(frozen=True, slots=True)
-class LinearDiscriminant:
-    """One two-feature linear discriminant against the empty class.
-
-    ``score = move_weight * z_move + still_weight * z_still + intercept``
-    is the shared-covariance Gaussian log-density ratio for one occupied
-    mode versus empty.  It is an emission score only; temporal priors remain
-    the filter's responsibility.
-    """
-
-    move_weight: float
-    still_weight: float
-    intercept: float
-
-
-@dataclass(frozen=True, slots=True)
-class OccupiedEmissionProfile:
-    """Learned active/settled emission model for one compatible feature path.
-
-    The two modes have equal prior weight by default.  This deliberately
-    prevents the operator's chosen recording durations from becoming an
-    occupancy-mode prior.  ``evidence_scale`` and the bounds turn the combined
-    discriminant into a safe per-second filter input.
-    """
-
-    active: LinearDiscriminant
-    settled: LinearDiscriminant
-    #: Runtime evidence family this profile was fitted from. A frame using
-    #: the other path must fall back to the legacy estimator.
-    path: str = "aggregate"
-    active_weight: float = 0.5
-    evidence_scale: float = 1.0
-    evidence_min: float = -3.0
-    evidence_max: float = 3.0
-    fingerprint: str | None = None
-    empty_rows: int = 0
-    active_rows: int = 0
-    settled_rows: int = 0
-    validation: EmissionValidationMetrics | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ConfusionMatrix:
-    """Exact binary validation counts for an occupied-emission profile."""
-
-    true_positive: int = 0
-    false_positive: int = 0
-    true_negative: int = 0
-    false_negative: int = 0
-
-    @property
-    def samples(self) -> int:
-        """Total classified observations."""
-        return self.true_positive + self.false_positive + self.true_negative + self.false_negative
-
-    @property
-    def sensitivity(self) -> float | None:
-        """Occupied recall, or ``None`` when no occupied labels exist."""
-        positives = self.true_positive + self.false_negative
-        return self.true_positive / positives if positives else None
-
-    @property
-    def specificity(self) -> float | None:
-        """Empty recall, or ``None`` when no empty labels exist."""
-        negatives = self.true_negative + self.false_positive
-        return self.true_negative / negatives if negatives else None
-
-    @property
-    def balanced_accuracy(self) -> float | None:
-        """Mean occupied and empty recall when both labels are present."""
-        if self.sensitivity is None or self.specificity is None:
-            return None
-        return (self.sensitivity + self.specificity) / 2.0
-
-
-@dataclass(frozen=True, slots=True)
-class EmissionScenario:
-    """One independently recorded validation scenario."""
-
-    name: str
-    expected_occupied: bool
-    features: tuple[tuple[float, float], ...]
-
-
-@dataclass(frozen=True, slots=True)
-class ScenarioEmissionMetrics:
-    """Validation result for one complete scenario, never a random row split."""
-
-    name: str
-    expected_occupied: bool
-    confusion: ConfusionMatrix
-    mean_discriminant: float
-    minimum_discriminant: float
-    maximum_discriminant: float
-
-
-@dataclass(frozen=True, slots=True)
-class EmissionValidationMetrics:
-    """Exact aggregate and per-scenario held-out validation metrics."""
-
-    threshold: float
-    confusion: ConfusionMatrix
-    scenarios: tuple[ScenarioEmissionMetrics, ...]
-    #: Signed filter-drive checks performed on the held-out captures.  These
-    #: are persisted so reload can reject a crafted or incomplete profile
-    #: instead of trusting confusion counts alone.
-    empty_mean_rate: float | None = None
-    occupied_mean_rates: Mapping[str, float] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
 class ZoneBaselines:
     """Persisted calibration for one zone (rule 3.3), normalized units."""
 
@@ -693,8 +509,6 @@ class ZoneBaselines:
     #: Gate resolution that produced a persisted gate family. Aggregate
     #: floors do not depend on it; a mismatch invalidates gate paths only.
     gate_size_cm: float | None = None
-    #: Optional validated occupied model. Missing on every legacy record.
-    occupied_profile: OccupiedEmissionProfile | None = None
 
 
 @dataclass(frozen=True, slots=True)

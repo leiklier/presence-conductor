@@ -23,7 +23,7 @@ from itertools import pairwise
 from statistics import fmean, median, pstdev
 from typing import TYPE_CHECKING
 
-from . import emissions, gating, stats
+from . import gating, stats
 from .events import RecordBaseline, SensorFrame
 from .model import (
     Activity,
@@ -186,26 +186,6 @@ def evidence_rate(
     (spikes are 4.2's job). This is a calibrated anomaly score, not a
     log-likelihood ratio (8.7).
     """
-    # A validated occupied profile replaces the heuristic anomaly-rate map
-    # only for the exact feature path it learned. One labeled feature row is
-    # one observation, so positive and negative learned evidence share the
-    # short observation budget; held rows never become repeated evidence.
-    profile = zst.occupied_profile
-    same_path = zst.move_from_gates == zst.still_from_gates
-    runtime_path = "gate" if zst.move_from_gates else "aggregate"
-    if (
-        profile is not None
-        and same_path
-        and profile.path == runtime_path
-        and move_age is not None
-        and still_age is not None
-        and max(move_age, still_age) <= t.obs_budget
-    ):
-        return min(
-            t.u_cap,
-            emissions.learned_evidence_rate(profile, (zst.z_move, zst.z_still)),
-        )
-
     rate = _channel_term(zst.z_move, t.k_move, move_age, t) + _channel_term(
         zst.z_still, t.k_still, still_age, t
     )
@@ -380,8 +360,6 @@ def _adapt_background(
     t = engine.config.tunables
     move_e, still_e, gate_move, gate_still = energies
     zones = engine.config.zones_for_sensor(sensor_id)
-    if any(engine.state.zones[z.zone_id].guided_calibration is not None for z in zones):
-        return  # scripted occupied phases must never become background
     # Energies are per sensor, not per zone: while ANY zone of this sensor is
     # elevated, its energies are plausibly a person, so no sibling zone may
     # learn them as background (3.4: "without learning a person as noise").
@@ -389,11 +367,7 @@ def _adapt_background(
         return
     for zone in zones:
         zst = engine.state.zones[zone.zone_id]
-        if (
-            zst.health is not Health.OK
-            or zst.recording is not None
-            or zst.occupied_profile is not None
-        ):
+        if zst.health is not Health.OK or zst.recording is not None:
             continue  # blind or actively calibrating: hold the floor
         if zst.below_since is None or now - zst.below_since < t.t_background:
             continue  # 3.4: quiet for at least t_background first
@@ -476,20 +450,6 @@ def on_record_baseline(
     if zone is None:  # unknown zone: ignore
         return
     zst = engine.state.zones[zone.zone_id]
-    siblings = engine.config.zones_for_sensor(zone.sensor_id)
-    if zst.guided_calibration is not None and zst.recording is not None:
-        return  # do not restart the baseline owned by a full session
-    if zst.guided_calibration is not None and zst.guided_calibration.status != "recording_baseline":
-        return  # a labeled phase owns this sensor
-    if any(
-        sibling.zone_id != zone.zone_id
-        and (
-            engine.state.zones[sibling.zone_id].recording is not None
-            or engine.state.zones[sibling.zone_id].guided_calibration is not None
-        )
-        for sibling in siblings
-    ):
-        return  # sensor-global aggregates cannot support concurrent windows
     sensor = engine.state.sensors[zone.sensor_id]
     # Start from the counters already adopted by the engine. The first tick
     # is fresh only if a post-command observation actually arrived.
@@ -836,19 +796,10 @@ def on_baseline_end(engine: ConductorEngine, zone_id: str, now: float, plan: Pla
             else:
                 new_stats.pop(key, None)  # accepted quiescent -> analytic fallback
         zst.stat_cal = new_stats
-        # The occupied classifier consumes these exact centered features.
-        # A new empty transform invalidates it until full calibration passes
-        # again; persistence omits the stale profile in the same transaction.
-        zst.occupied_profile = None
-        zst.last_validation = None
         zst.last_adapt_at = None  # new floor: re-anchor the adaptation EMA
-        # A Full run stages this baseline in memory until held-out validation
-        # succeeds.  This keeps the entire workflow atomic across failures and
-        # restarts: the adapter continues to hold the previous persisted
-        # calibration while the guided session is in progress.
-        if zst.guided_calibration is None:
-            plan.persist_calibration = True
-            plan.persist_calibration_zones.add(zone.zone_id)
+        # 3.3: baselines persist in the config entry (adapter saves them).
+        plan.persist_calibration = True
+        plan.persist_calibration_zones.add(zone.zone_id)
     plan.emit_control(
         BaselineRecorded(
             zone_id=zone.zone_id,
